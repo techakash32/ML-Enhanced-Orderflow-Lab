@@ -60,7 +60,7 @@ def once(argv: list[str]) -> int:
             removed = FeatureStore(a.store).compact()
             log.info("feature store compacted (%d part files merged)", removed)
             res = train.run(a)
-        status, code = "ok", 0
+        status, code = res.get("status", "ok"), 0       # promoted | kept_champion | needs_more_data
     except RuntimeError as exc:                     # e.g. not enough data yet
         log.error("retrain skipped: %s", exc)
         res, status, code = {"error": str(exc)}, "skipped", 2

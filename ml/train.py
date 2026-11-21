@@ -30,6 +30,7 @@ from config import settings
 from features.orderflow import MODEL_FEATURES
 from ml.bundle import (compatible, copy_bundle_atomic, load_bundle, predict_favorable, save_bundle)
 from ml.dataset import build_dataset, target
+from ml.exit_sim import ExitRules
 from ml.labeling import BarrierConfig, PurgedWalkForward, purge_before
 from ml.metrics import classification_metrics, economic_metrics, threshold_table
 
@@ -42,19 +43,28 @@ def parse_args(argv=None) -> argparse.Namespace:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     g = p.add_argument_group("data")
     g.add_argument("--store", default=settings.FEATURE_STORE_PATH)
-    g.add_argument("--symbols", default=",".join(settings.SYMBOLS))
+    g.add_argument("--symbols", default=",".join(settings.FEATURE_SYMBOLS))
     g.add_argument("--start", help="UTC date YYYY-MM-DD")
     g.add_argument("--end", help="UTC date YYYY-MM-DD (inclusive)")
     g.add_argument("--lookback-days", type=float, help="alternative to --start: last N days")
     g = p.add_argument_group("labels")
+    g.add_argument("--exit-mode", choices=["live_trail", "static_barrier"], default="live_trail",
+                   help="live_trail (default): label = outcome of a simulated trade with the LIVE "
+                        "PaperTrader exit rules (settings.py). static_barrier: research-only triple barrier "
+                        "using --tp-atr/--sl-atr/--max-hold-bars")
+    g.add_argument("--exit-atr-mult", type=float, help="override live stop/trail multiple (breaks parity!)")
+    g.add_argument("--exit-hold-bars", type=int, help="override live time stop (breaks parity!)")
+    g.add_argument("--be-band-r", type=float, default=0.10,
+                   help="live_trail: |net R| below this is labelled breakeven (0)")
     g.add_argument("--objective", choices=["multiclass", "binary"], default="multiclass")
-    g.add_argument("--tp-atr", type=float, default=1.5)
+    g.add_argument("--tp-atr", type=float, default=1.5, help="static_barrier only")
     g.add_argument("--sl-atr", type=float, default=1.0)
     g.add_argument("--max-hold-bars", type=int, default=6)
     g.add_argument("--bar-s", type=int, default=settings.INTERVAL_MS // 1000)
     g.add_argument("--atr-window", type=int, default=settings.TREND_ATR_WINDOW)
     g.add_argument("--snapshot-s", type=int, default=settings.FEATURE_SNAPSHOT_S)
-    g.add_argument("--stride-s", type=int, default=1800, help="sample spacing (default 30 min)")
+    g.add_argument("--stride-s", type=int, default=1800,
+                   help="static_barrier sample spacing; live_trail always samples bar closes")
     g.add_argument("--cost-pct", type=float,
                    default=2 * settings.PAPER_FEE_TAKER_PCT + 2 * settings.PAPER_SLIPPAGE_PCT,
                    help="round-trip fees+slippage, %% of price")
@@ -87,12 +97,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--out-dir", default=os.path.dirname(settings.ML_MODEL_PATH.rstrip("/\\")) or "models")
     g = p.add_argument_group("promotion gate")
     g.add_argument("--no-promote", action="store_true", help="train + log, never touch champion")
-    g.add_argument("--promotion-metric", choices=["edge", "expectancy_r"], default="edge")
+    g.add_argument("--promotion-metric", choices=["auto", "edge", "expectancy_r"], default="auto",
+                   help="auto: expectancy_r for live_trail, edge for static_barrier")
     g.add_argument("--tolerance", type=float, default=0.01,
                    help="challenger may be at most this much worse than champion")
     g.add_argument("--min-metric", type=float, default=0.0,
                    help="absolute floor on the holdout metric for the FIRST champion")
-    g.add_argument("--min-holdout-trades", type=int, default=30)
+    g.add_argument("--min-holdout-trades", type=int, default=settings.MIN_HOLDOUT_TRADES,
+                   help="below this the challenger is NOT promoted: status needs_more_data")
     g.add_argument("--force-promote", action="store_true")
     return p.parse_args(argv)
 
@@ -146,8 +158,18 @@ def p_fav(p, objective):
 
 
 def eco(ds, p, thr, cfg, block):
-    return economic_metrics(ds["y"].to_numpy(), ds["ret_atr"].to_numpy(), ds["cost_atr"].to_numpy(),
-                            p > thr, cfg.tp_atr, cfg.sl_atr, ds["ts_ms"].to_numpy(), block)
+    nr = ds["net_r"].to_numpy() if cfg.exit_mode == "live_trail" else None
+    m = economic_metrics(ds["y"].to_numpy(), ds["ret_atr"].to_numpy(), ds["cost_atr"].to_numpy(),
+                         p > thr, cfg.tp_atr, cfg.sl_atr, ds["ts_ms"].to_numpy(), block, net_r=nr)
+    m["n_taken_candidates"] = int(((p > thr) & (ds["cand"].to_numpy() == 1)).sum())
+    return m
+
+
+def table(ds, p, cfg, block):
+    return threshold_table(p, ds["y"].to_numpy(), ds["ret_atr"].to_numpy(), ds["cost_atr"].to_numpy(),
+                           cfg.tp_atr, cfg.sl_atr, ds["ts_ms"].to_numpy(), block,
+                           net_r=ds["net_r"].to_numpy() if cfg.exit_mode == "live_trail" else None,
+                           cand=ds["cand"].to_numpy())
 
 
 def decide_promotion(chall: dict, champ: dict | None, metric: str, tol: float, min_metric: float,
@@ -178,9 +200,18 @@ def _flat(d: dict, prefix: str) -> dict:
 
 # ------------------------------------------------------------------ main ---
 def run(a: argparse.Namespace) -> dict:
+    ov = {k: v for k, v in (("atr_mult", a.exit_atr_mult), ("max_hold_bars", a.exit_hold_bars)) if v is not None}
+    rules = ExitRules.from_settings(be_band_r=a.be_band_r, **ov)
+    parity = rules.parity_key() == ExitRules.from_settings().parity_key()
+    if a.exit_mode == "live_trail" and not parity:
+        log.warning("exit rules overridden (%s): model will NOT match live exits and the live gate will "
+                    "refuse it unless ML_ALLOW_EXIT_MISMATCH=true", ov)
     cfg = BarrierConfig(tp_atr=a.tp_atr, sl_atr=a.sl_atr, max_hold_bars=a.max_hold_bars,
                         bar_s=a.bar_s, atr_window=a.atr_window, snapshot_s=a.snapshot_s,
-                        stride_s=a.stride_s, cost_pct=a.cost_pct, sample_mode=a.sample_mode)
+                        stride_s=a.stride_s, cost_pct=a.cost_pct, sample_mode=a.sample_mode,
+                        exit_mode=a.exit_mode, rules=rules)
+    if a.exit_mode == "live_trail":
+        cfg.atr_window = rules.atr_window
     now = datetime.now(timezone.utc)
     start_ms = _ms(a.start) if a.start else (
         int((now.timestamp() - a.lookback_days * 86400) * 1000) if a.lookback_days else None)
@@ -191,7 +222,12 @@ def run(a: argparse.Namespace) -> dict:
     t0, t1 = ds["ts_ms"].to_numpy(), ds["t1_ms"].to_numpy()
     X, y = ds[MODEL_FEATURES], target(ds, a.objective)
     n_class = 3 if a.objective == "multiclass" else 2
-    block = max(1, int(cfg.max_hold_bars * cfg.bar_s / cfg.stride_s))
+    if cfg.exit_mode == "live_trail":
+        block = max(1, int(np.ceil(np.median(ds["held"]))) * 2)     # a trade's life, both sides interleaved
+    else:
+        block = max(1, int(cfg.max_hold_bars * cfg.bar_s / cfg.stride_s))
+    metric = a.promotion_metric if a.promotion_metric != "auto" else (
+        "expectancy_r" if cfg.exit_mode == "live_trail" else "edge")
     embargo_s = int(a.embargo_bars * cfg.bar_s)
     params = lgb_params(a, n_class)
     log.info("dataset: %d rows, %s -> %s, label mix %s", len(ds),
@@ -239,8 +275,7 @@ def run(a: argparse.Namespace) -> dict:
     oi = np.concatenate(oof_idx)
     op = np.concatenate(oof_p)
     oof_eco = eco(ds.iloc[oi], op, a.threshold, cfg, block)
-    oof_table = threshold_table(op, ds["y"].to_numpy()[oi], ds["ret_atr"].to_numpy()[oi],
-                                ds["cost_atr"].to_numpy()[oi], cfg.tp_atr, cfg.sl_atr, t0[oi], block)
+    oof_table = table(ds.iloc[oi], op, cfg, block)
 
     # ---- refit on all dev rows (iterations from CV), evaluate on holdout
     n_final = max(50, int(np.median(best_iters) * 1.1))
@@ -249,9 +284,23 @@ def run(a: argparse.Namespace) -> dict:
     hold_cls = classification_metrics(y[hold], ph, a.objective)
     hold_eco = eco(ds.iloc[hold], p_fav(ph, a.objective), a.threshold, cfg, block)
     hold_base = eco(ds.iloc[hold], np.ones(len(hold)), -1, cfg, block)
-    hold_table = threshold_table(p_fav(ph, a.objective), ds["y"].to_numpy()[hold],
-                                 ds["ret_atr"].to_numpy()[hold], ds["cost_atr"].to_numpy()[hold],
-                                 cfg.tp_atr, cfg.sl_atr, t0[hold], block)
+    hold_table = table(ds.iloc[hold], p_fav(ph, a.objective), cfg, block)
+    # ---- trade-count report (Phase 6.3)
+    cls_ct = {int(k): int(v) for k, v in zip(*np.unique(ds["y"], return_counts=True))}
+    report_lines = [
+        f"TRADE-COUNT REPORT: labelled rows={len(ds)} (loss/flat/win={cls_ct.get(-1, 0)}/{cls_ct.get(0, 0)}/{cls_ct.get(1, 0)}), "
+        f"dev={len(dev)}, holdout={len(hold)}, live-candidate rows in holdout={int(ds['cand'].to_numpy()[hold].sum())}",
+        "  threshold -> holdout trades (all rows / live-candidate rows) | win rate | net R"]
+    for k, v in hold_table.items():
+        report_lines.append(f"  P>{k}: {v['n_taken']:5d} / {v['n_taken_candidates']:4d} | "
+                            f"{v['win_rate']:.3f} | {v['expectancy_r']:+.3f}R" if v["n_taken"] else
+                            f"  P>{k}:     0 /    0 |   -   |   -")
+    log.info("\n".join(report_lines))
+    if hold_eco["n_taken"] < a.min_holdout_trades:
+        feasible = [k for k, v in hold_table.items() if v["n_taken"] >= a.min_holdout_trades]
+        log.warning("holdout takes %d trades at P>%.2f (< floor %d). Thresholds that would reach the floor: %s. "
+                    "Other levers: more symbols (FEATURE_SYMBOLS), longer history, 1h bars.",
+                    hold_eco["n_taken"], a.threshold, a.min_holdout_trades, feasible or "none")
     log.info("HOLDOUT n=%d | gate@%.2f took %d: WR=%.3f vs breakeven %.3f -> edge %+.4f "
              "(95%% CI %+.4f..%+.4f), net %+.3fR | ungated edge %+.4f",
              len(hold), a.threshold, hold_eco["n_taken"], hold_eco["win_rate"], hold_eco["breakeven_wr"],
@@ -270,6 +319,9 @@ def run(a: argparse.Namespace) -> dict:
         "objective": a.objective, "classes": [-1, 0, 1] if a.objective == "multiclass" else [0, 1],
         "favorable_index": 2 if a.objective == "multiclass" else None,
         "default_threshold": a.threshold, "barrier": cfg.to_dict(), "lgb_params": params,
+        "exit_mode": a.exit_mode, "exit_rules": rules.parity_key() if a.exit_mode == "live_trail" else None,
+        "exit_parity_with_settings": bool(parity and a.exit_mode == "live_trail"),
+        "trade_count_report": {"threshold_table_holdout": hold_table, "class_counts": cls_ct},
         "n_estimators": n_final,
         "data": {"symbols": symbols, "n_rows": len(ds), "n_dev": int(len(dev)), "n_holdout": int(len(hold)),
                  "from_utc": str(pd.to_datetime(t0.min(), unit="ms", utc=True)),
@@ -316,8 +368,10 @@ def run(a: argparse.Namespace) -> dict:
         log.warning("could not evaluate champion (%s) - treating as none", exc)
 
     promote, reason = (False, "promotion disabled (--no-promote)") if a.no_promote else decide_promotion(
-        hold_eco, champ_eco, a.promotion_metric, a.tolerance, a.min_metric, a.min_holdout_trades,
+        hold_eco, champ_eco, metric, a.tolerance, a.min_metric, a.min_holdout_trades,
         a.force_promote)
+    status = ("needs_more_data" if hold_eco["n_taken"] < a.min_holdout_trades and not a.force_promote
+              else "promoted" if promote else "kept_champion")
     log.info("PROMOTE=%s - %s", promote, reason)
 
     version = None
@@ -348,10 +402,10 @@ def run(a: argparse.Namespace) -> dict:
         copy_bundle_atomic(bundle_dir, champ_dir)
         log.info("local champion updated: %s", champ_dir)
 
-    return {"run_name": run_name, "bundle_dir": bundle_dir, "mlflow_run_id": run_id,
+    return {"status": status, "run_name": run_name, "bundle_dir": bundle_dir, "mlflow_run_id": run_id,
             "registry_version": version, "promoted": promote, "reason": reason,
             "holdout": hold_eco, "holdout_ungated": hold_base, "champion_holdout": champ_eco,
-            "cv_summary": cv_summary, "oof": oof_eco}
+            "cv_summary": cv_summary, "oof": oof_eco, "holdout_table": hold_table}
 
 
 def main(argv=None) -> int:

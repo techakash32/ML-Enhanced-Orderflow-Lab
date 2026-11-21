@@ -223,8 +223,25 @@ async def main() -> None:
     os.makedirs(LOG_DIR, exist_ok=True)
     recorder = None
     if settings.RECORD_FEATURES or settings.USE_ML_GATE:
-        recorder = FeatureRecorder(settings.SYMBOLS)
+        recorder = FeatureRecorder(sorted(set(settings.FEATURE_SYMBOLS) | set(settings.SYMBOLS)))
     runners = [LiveTrendRunner(symbol, recorder) for symbol in settings.SYMBOLS]
+    if settings.USE_ML_GATE:
+        try:
+            from ml.gate import MLGate
+            shared_gate = MLGate()                      # one model shared by all symbols
+            for r in runners:
+                r.decider._ml = shared_gate
+            if shared_gate.available:
+                log.info("ML gate active: model %s (threshold %.2f, on-missing-features=%s)",
+                         shared_gate.status()["model_version"], settings.ML_GATE_THRESHOLD,
+                         settings.ML_ON_MISSING_FEATURES)
+            else:
+                log.warning("ML gate enabled but no usable model - falling back to rule-based gate "
+                            "until a champion appears (hot-reload)")
+        except Exception as exc:
+            log.warning("ML gate unavailable (%s) - using rule-based gate", exc)
+    else:
+        log.info("Entry gate: rule-based (USE_ML_GATE=false)")
 
     log.info("Preloading up to %d closed %s bars for %d symbols",
              PRELOAD_BARS, INTERVAL, len(runners))
