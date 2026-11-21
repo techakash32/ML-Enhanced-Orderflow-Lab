@@ -122,6 +122,33 @@ is expected. `docker-compose.yml` runs trader + MLflow UI (+ optional retrain pr
 **mount the persistent disk at `/app/logs`** (all state lives there), Starter plan or higher. `scripts/smoke_deploy.sh` automates the
 10 smoke checks on a machine with internet + Docker.
 
+## Monitoring a live champion (Phase 7)
+**Gate state** (`engine/decision.py`, `ml/telemetry.py`): every decision carries `gate_state` (`active`/`idle`/`stand_aside`/`fallback`/`rules`),
+`gate_reason` (`stale_features`, `feature_nan`, `below_threshold`, `missing_model`, `c_veto`, `no_candidate`) and `feature_age_s`.
+`/health` → `gate_state.line` and the dashboard line read e.g. *"ML gate: STAND-ASIDE (stale features, 47s old)"*. Features older than
+`ML_MAX_FEATURE_AGE_S` (180) count as stale.
+
+**Drift** (`python -m ml.monitor`, hourly in `start.sh` unless `ENABLE_MONITOR_LOOP=false`; idle without a champion). Baselines are stored in the
+champion manifest (`training_distribution`, written by `ml.train`), so nothing is recomputed from training data:
+| Check | Compared | Flag |
+|---|---|---|
+| Feature drift | PSI per feature, live warm snapshots (last 3 d) vs training snapshots | PSI > 0.2 (0.1–0.2 = watch) |
+| Prediction drift | live mean P(favourable), all bar closes, both sides vs holdout mean | \|z\| > 2, z uses the standard error with n = distinct bar closes |
+| Gate firing rate | fraction of live scores with P > threshold vs holdout | relative change > 50 % |
+| Outcome drift | realised win rate of ML-gated paper trades vs holdout, bootstrap CI | holdout win rate above the CI (needs ≥ 10 closed ML trades) |
+Every check has a minimum sample size, so a handful of points cannot flag. Results: `logs/ml/monitor.json` (`/health` → `monitor`, dashboard shows `DRIFT: …`),
+`monitor_history.jsonl`, and — with `--mlflow` — tags on a run in `orderflow_lgbm_monitoring` when drift appears or clears. `ml.retrain` records the
+past week's drift events in its history and as an MLflow tag on the training run. A champion trained before Phase 7 has no baseline: retrain once.
+Prediction/firing checks use `logs/ml/gate_log.jsonl` (model scores for both sides at every bar close, written only while the gate is on).
+
+## Day-14 checkpoint and dry runs
+```bash
+python -m ml.train --report-trade-rate      # recorded days, live-candidate rate, projected holdout trades / days-to-floor at 10/25/50 % take-rate
+python -m ml.retrain --dry-run              # full pipeline on the real store; no MLflow, no promotion, no history - shows needs_more_data
+python -m ml.labeling --input logs/feature_store --out labels.parquet
+```
+The decision whether to relax a strategy lever is **yours**; see docs/PARITY_REPORT.md §4.
+
 ## Things to know before trusting a number
 * **Overlapping labels.** A trade can last up to 90 bars, so neighbouring labels overlap heavily; purging uses each trade's
   exit time and the bootstrap uses blocks, but the effective sample size is far below the row count.

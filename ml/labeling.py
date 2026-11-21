@@ -282,3 +282,27 @@ def purge_before(t0: np.ndarray, t1: np.ndarray, boundary_ms: int, embargo_s: in
     (decision before it, label resolved before it minus embargo)."""
     t0, t1 = np.asarray(t0), np.asarray(t1)
     return np.flatnonzero((t0 < boundary_ms) & (t1 < boundary_ms - embargo_s * 1000))
+
+
+if __name__ == "__main__":
+    # python -m ml.labeling --input logs/feature_store [--out labels.parquet]
+    import argparse
+    import logging
+    from config import settings
+    from ml.dataset import build_dataset
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s")
+    ap = argparse.ArgumentParser(description="Build live-exit-parity labels from a feature store")
+    ap.add_argument("--input", default=settings.FEATURE_STORE_PATH)
+    ap.add_argument("--symbols", default=",".join(settings.FEATURE_SYMBOLS))
+    ap.add_argument("--bar-s", type=int, default=settings.INTERVAL_MS // 1000)
+    ap.add_argument("--out", help="optional parquet path for the labelled dataset")
+    ap.add_argument("--exit-mode", choices=["live_trail", "static_barrier"], default="live_trail")
+    a = ap.parse_args()
+    cfg = BarrierConfig(bar_s=a.bar_s, atr_window=settings.TREND_ATR_WINDOW, exit_mode=a.exit_mode,
+                        snapshot_s=settings.FEATURE_SNAPSHOT_S)
+    ds = build_dataset(a.input, [s for s in a.symbols.split(",") if s], None, None, cfg)
+    print(f"{len(ds)} labelled rows; label counts {ds['y'].value_counts().to_dict()}; "
+          f"live-candidate rows {int(ds['cand'].sum())}")
+    if a.out:
+        ds.to_parquet(a.out, index=False)
+        print("written", a.out)

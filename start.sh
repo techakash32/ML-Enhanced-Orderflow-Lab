@@ -4,6 +4,7 @@
 # platform restarts it. Optional helpers (MLflow UI, weekly retrain) never take it down.
 #
 #   MLFLOW_SERVER=true         start the MLflow UI on $MLFLOW_PORT (default 5000)
+#   ENABLE_MONITOR_LOOP=false  disable the hourly drift monitor (default on; idle without a champion)
 #   ENABLE_RETRAIN_LOOP=true   run `python -m ml.retrain --loop` every $RETRAIN_EVERY_DAYS (default 7)
 
 python -m scripts.paper_live &
@@ -23,6 +24,11 @@ if [ "${MLFLOW_SERVER:-false}" = "true" ]; then
 fi
 if [ "${ENABLE_RETRAIN_LOOP:-false}" = "true" ]; then
   python -m ml.retrain --loop --every-days "${RETRAIN_EVERY_DAYS:-7}" &
+  OPTIONAL_PIDS="$OPTIONAL_PIDS $!"
+fi
+
+if [ "${ENABLE_MONITOR_LOOP:-true}" = "true" ]; then
+  python -m ml.monitor --loop --every-min "${MONITOR_EVERY_MIN:-60}" --mlflow &
   OPTIONAL_PIDS="$OPTIONAL_PIDS $!"
 fi
 

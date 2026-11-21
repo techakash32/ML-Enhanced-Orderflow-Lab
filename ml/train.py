@@ -32,6 +32,7 @@ from ml.bundle import (compatible, copy_bundle_atomic, load_bundle, predict_favo
 from ml.dataset import build_dataset, target
 from ml.exit_sim import ExitRules
 from ml.labeling import BarrierConfig, PurgedWalkForward, purge_before
+from ml.monitor import build_training_distribution
 from ml.metrics import classification_metrics, economic_metrics, threshold_table
 
 log = logging.getLogger("ml.train")
@@ -42,7 +43,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="python -m ml.train", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     g = p.add_argument_group("data")
-    g.add_argument("--store", default=settings.FEATURE_STORE_PATH)
+    g.add_argument("--store", "--data", dest="store", default=settings.FEATURE_STORE_PATH)
+    g.add_argument("--report-trade-rate", action="store_true",
+                   help="no training: print live-candidate rate and projected holdout trade counts / "
+                        "time-to-30-trades from the data recorded so far (Track B day-14 checkpoint)")
     g.add_argument("--symbols", default=",".join(settings.FEATURE_SYMBOLS))
     g.add_argument("--start", help="UTC date YYYY-MM-DD")
     g.add_argument("--end", help="UTC date YYYY-MM-DD (inclusive)")
@@ -91,6 +95,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--seed", type=int, default=42)
     g = p.add_argument_group("mlflow / registry")
     g.add_argument("--no-mlflow", action="store_true")
+    g.add_argument("--mlflow", action="store_true", help="(default behaviour; accepted for clarity)")
     g.add_argument("--tracking-uri", default=settings.MLFLOW_TRACKING_URI or None)
     g.add_argument("--experiment", default="orderflow_lgbm")
     g.add_argument("--registered-model", default=settings.ML_REGISTERED_MODEL)
@@ -198,6 +203,51 @@ def _flat(d: dict, prefix: str) -> dict:
             if isinstance(v, (int, float, np.floating, np.integer)) and np.isfinite(v)}
 
 
+# ------------------------------------------------------------ trade rate ---
+def report_trade_rate(a: argparse.Namespace) -> dict:
+    """Track B checkpoint: how many trades will the holdout / live gate see, and how long until the
+    promotion floor? Uses labels only (no model). The model's real take-rate is unknown before the
+    first training run, so the projection is shown for a range of assumed take-rates."""
+    rules = ExitRules.from_settings(be_band_r=a.be_band_r)
+    cfg = BarrierConfig(bar_s=a.bar_s, atr_window=rules.atr_window, snapshot_s=a.snapshot_s,
+                        cost_pct=a.cost_pct, exit_mode="live_trail", rules=rules)
+    now = datetime.now(timezone.utc)
+    start_ms = _ms(a.start) if a.start else (
+        int((now.timestamp() - a.lookback_days * 86400) * 1000) if a.lookback_days else None)
+    end_ms = _ms(a.end, True) if a.end else None
+    symbols = [s.strip().upper() for s in a.symbols.split(",") if s.strip()] or None
+    from features.store import FeatureStore
+    snaps = FeatureStore(a.store).read(symbols, start_ms, end_ms)
+    span_days = (snaps["ts_ms"].max() - snaps["ts_ms"].min()) / 86_400_000 if len(snaps) else 0.0
+    out = {"recorded_days": round(float(span_days), 2), "labelled_rows": 0}
+    try:
+        ds = build_dataset(a.store, symbols, start_ms, end_ms, cfg)
+    except RuntimeError as exc:
+        out["note"] = str(exc)
+        print(json.dumps(out, indent=2))
+        return out
+    lab_days = (ds["ts_ms"].max() - ds["ts_ms"].min()) / 86_400_000 or 1e-9
+    rows_day, cand_day = len(ds) / lab_days, float(ds["cand"].sum()) / lab_days
+    out.update(labelled_rows=len(ds), labelled_days=round(float(lab_days), 2), rows_per_day=round(rows_day, 1),
+               live_candidates_per_day=round(cand_day, 3), live_candidates_per_month=round(cand_day * 30, 1),
+               candidate_share_of_rows=round(float(ds["cand"].mean()), 4))
+    h, floor = a.holdout_frac, a.min_holdout_trades
+    proj = {}
+    for take in (0.10, 0.25, 0.50):
+        have = len(ds) * h * take                         # holdout trades the gate would take today
+        need_days = floor / max(rows_day * h * take, 1e-9)    # labelled days needed to reach the floor
+        proj[f"take_{int(take * 100)}pct"] = {
+            "holdout_trades_now": round(have, 1),
+            "labelled_days_needed": round(need_days, 1),
+            "more_days_needed": round(max(0.0, need_days - lab_days), 1)}
+    out["projection_all_rows"] = proj
+    out["floor"] = floor
+    out["hint"] = ("below the Track-B trigger: consider relaxing ONE lever (TREND_LONDON_ONLY=false first)"
+                   if proj["take_25pct"]["holdout_trades_now"] < 15 else "on track - hold the current config")
+    print(json.dumps(out, indent=2))
+    return out
+
+
 # ------------------------------------------------------------------ main ---
 def run(a: argparse.Namespace) -> dict:
     ov = {k: v for k, v in (("atr_mult", a.exit_atr_mult), ("max_hold_bars", a.exit_hold_bars)) if v is not None}
@@ -271,7 +321,9 @@ def run(a: argparse.Namespace) -> dict:
     if not folds:
         raise RuntimeError("no usable CV folds")
     fdf = pd.DataFrame(folds)
-    cv_summary = {c: float(np.nanmean(fdf[c])) for c in fdf.columns if c not in ("fold",)}
+    with np.errstate(all="ignore"), __import__("warnings").catch_warnings():
+        __import__("warnings").simplefilter("ignore", RuntimeWarning)      # folds that took 0 trades give NaN
+        cv_summary = {c: float(np.nanmean(fdf[c])) for c in fdf.columns if c not in ("fold",)}
     oi = np.concatenate(oof_idx)
     op = np.concatenate(oof_p)
     oof_eco = eco(ds.iloc[oi], op, a.threshold, cfg, block)
@@ -331,6 +383,15 @@ def run(a: argparse.Namespace) -> dict:
         "cv": {"oof_economic": oof_eco},
         "lightgbm_version": lgb.__version__,
     }
+    # baseline for ml.monitor (feature PSI / prediction drift / firing rate / outcome drift)
+    try:
+        from features.store import FeatureStore
+        snaps = FeatureStore(a.store).read(symbols, start_ms, boundary)
+        snaps = snaps[snaps["warm"] == 1.0]
+        manifest["training_distribution"] = build_training_distribution(
+            snaps, p_fav(ph, a.objective), a.threshold, hold_eco, rules.be_band_r)
+    except Exception as exc:                       # monitoring baseline must never block training
+        log.warning("could not build training_distribution (%s)", exc)
     save_bundle(booster, manifest, bundle_dir)
     imp.to_csv(os.path.join(bundle_dir, "feature_importance.csv"), index=False)
     with open(os.path.join(bundle_dir, "report.json"), "w", encoding="utf-8") as f:
@@ -412,6 +473,9 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s",
                         datefmt="%H:%M:%S")
     a = parse_args(argv)
+    if a.report_trade_rate:
+        report_trade_rate(a)
+        return 0
     try:
         res = run(a)
     except RuntimeError as exc:

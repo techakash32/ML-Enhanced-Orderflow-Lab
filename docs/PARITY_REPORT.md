@@ -77,3 +77,14 @@ Two different counts matter:
 **Rough data requirement (estimate, not measured):** 8 symbols × 6 bar-closes × 2 sides ≈ 96 rows/day. With a ~15 % gate take-rate,
 ≥ 30 holdout trades needs ≈ 200 holdout rows ⇒ ≈ 1000 labelled rows ⇒ ≈ 10 days of *resolved* bars, plus the 15-day label horizon,
 2.3-day ATR warm-up and ~6 h feature warm-up ⇒ **roughly 4 weeks of recording** for a first promotable champion; more if the model is selective.
+
+## 4. Strategy-relaxation decision (OPEN — to be filled in on day 14 of real recording)
+Not decided here. Plan under consideration: keep the current configuration for the first weeks; on day 14 run
+`python -m ml.train --report-trade-rate` and read the projected holdout trades / days-to-floor. If the projection is poor,
+relax **one** lever at a time (`TREND_LONDON_ONLY=false` first, the least disruptive), then re-measure.
+The `--report-trade-rate` output uses *assumed* gate take-rates (10/25/50 %) because the real take-rate is unknown before the
+first model; its "hint" line applies a simple rule (<15 holdout trades at 25 % take) and is a prompt for judgement, not a verdict.
+
+| Date | Recorded days | Live candidates / month | Projected trades at 25 % take | Decision | Rationale |
+|---|---|---|---|---|---|
+| | | | | | |

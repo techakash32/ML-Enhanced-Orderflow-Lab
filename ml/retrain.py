@@ -48,17 +48,20 @@ class _Lock:
             pass
 
 
-def once(argv: list[str]) -> int:
+def once(argv: list[str], dry_run: bool = False) -> int:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--lookback-days", type=float, default=float(os.environ.get("RETRAIN_LOOKBACK_DAYS", "90")))
     known, rest = p.parse_known_args(argv)
     extra = os.environ.get("RETRAIN_ARGS", "").split()
+    if dry_run:      # full pipeline on real data, but touch nothing: no MLflow, no promotion, no history
+        rest = [*rest, "--no-mlflow", "--no-promote"]
     a = train.parse_args(["--lookback-days", str(known.lookback_days), *extra, *rest])
     started = datetime.now(timezone.utc).isoformat()
     try:
         with _Lock():
-            removed = FeatureStore(a.store).compact()
-            log.info("feature store compacted (%d part files merged)", removed)
+            if not dry_run:
+                removed = FeatureStore(a.store).compact()
+                log.info("feature store compacted (%d part files merged)", removed)
             res = train.run(a)
         status, code = res.get("status", "ok"), 0       # promoted | kept_champion | needs_more_data
     except RuntimeError as exc:                     # e.g. not enough data yet
@@ -67,11 +70,29 @@ def once(argv: list[str]) -> int:
     except Exception as exc:
         log.exception("retrain failed")
         res, status, code = {"error": repr(exc)}, "failed", 1
+    if dry_run:
+        print(json.dumps({"dry_run": True, "status": status, "reason": res.get("reason") or res.get("error"),
+                          "holdout_trades": (res.get("holdout") or {}).get("n_taken")}, default=float))
+        return code
+    # what did the drift monitor see this past week? (visible next to the training record + in MLflow)
+    try:
+        from ml.monitor import drift_events
+        drift = drift_events()
+    except Exception:
+        drift = None
+    if drift and res.get("mlflow_run_id"):
+        try:
+            import mlflow
+            mlflow.MlflowClient().set_tag(res["mlflow_run_id"], "drift_events_7d", json.dumps(drift))
+        except Exception:
+            log.warning("could not tag retrain run with drift events")
+    res["drift_events_7d"] = drift
     os.makedirs(os.path.dirname(HISTORY), exist_ok=True)
     with open(HISTORY, "a", encoding="utf-8") as f:
         f.write(json.dumps({"started": started, "status": status,
                             **{k: res.get(k) for k in ("run_name", "promoted", "reason", "registry_version",
-                                                       "holdout", "champion_holdout", "error")}},
+                                                       "holdout", "champion_holdout", "error",
+                                                       "drift_events_7d")}},
                            default=float) + "\n")
     return code
 
@@ -79,6 +100,10 @@ def once(argv: list[str]) -> int:
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s")
     argv = list(sys.argv[1:] if argv is None else argv)
+    dry = "--dry-run" in argv
+    if dry:
+        argv.remove("--dry-run")
+        return once(argv, dry_run=True)
     if "--loop" in argv:
         argv.remove("--loop")
         days = 7.0
