@@ -34,3 +34,8 @@ dist/
 # OS files
 .DS_Store
 Thumbs.db
+# ML artifacts (feature store, models, MLflow db live under logs/ml; keep local ones out too)
+mlruns/
+mlflow.db
+models/
+feature_store/

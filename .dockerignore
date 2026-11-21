@@ -17,3 +17,9 @@ test/
 bars/
 Dockerfile
 .dockerignore
+tests/
+mlruns/
+mlflow.db
+models/
+feature_store/
+

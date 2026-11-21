@@ -35,6 +35,8 @@ It gives you one code path for both research and live paper trading, so a backte
 - **Optional LLM narrative**: Groq-powered rationale for each decision (off unless you set an API key).
 - **Docker and Render ready.**
 
+> **New:** an optional LightGBM entry gate trained on order-flow features (OFI, VPIN, microprice, queue imbalance, trade-size stats) can replace the rule-based confirmation step. See [ML_README.md](ML_README.md). Off by default (`USE_ML_GATE=false`).
+
 ## How it works
 
 ```

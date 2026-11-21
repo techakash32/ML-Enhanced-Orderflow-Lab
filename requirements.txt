@@ -15,3 +15,13 @@ flashalpha==1.4.0      # GEX data (FLASHALPHA_API_KEY)
 
 # Used by the verify/check scripts
 python-dotenv==1.2.4
+
+# --- ML entry gate (ML_README.md) ---
+# Live inference needs only numpy/pandas/pyarrow/lightgbm; mlflow is for training/registry/UI.
+numpy>=2.0,<3
+pandas>=2.2,<4
+pyarrow>=16
+scikit-learn>=1.5,<2          # metrics only
+lightgbm>=4.3,<5
+mlflow>=2.14,<4               # tracking + model registry (SQLite backend), optional UI server
+pytest>=8                     # tests/
