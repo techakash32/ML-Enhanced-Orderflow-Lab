@@ -19,10 +19,23 @@ Conventions (chosen to mirror execution/paper_trader.py)
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from typing import Iterator
+from typing import Iterator, Optional
 
 import numpy as np
 import pandas as pd
+
+from ml.exit_sim import ExitRules, bar_atr, label_from_net_r, simulate_trade
+
+# ----------------------------------------------------------------------------
+# LABEL / EXIT PARITY RULE (Phase 6.1)
+#   exit_mode="live_trail" (default): the label is the OUTCOME OF A SIMULATED LIVE TRADE -
+#   same entry, ATR stop, trailing stop, time stop and costs as execution/paper_trader.py,
+#   with all parameters read from config/settings.py via ml.exit_sim.ExitRules. Parity with
+#   the real PaperTrader is enforced by tests/test_exit_parity.py, and models record the rules
+#   they were trained on (manifest["exit_rules"]); the live gate refuses a mismatching model.
+#   exit_mode="static_barrier": the original research-style triple barrier (below). It does NOT
+#   describe how live trades exit - use for experiments only.
+# ----------------------------------------------------------------------------
 
 
 @dataclass
@@ -37,9 +50,16 @@ class BarrierConfig:
     cost_pct: float = 0.18        # round trip % of price: 2*taker + 2*slippage
     min_bar_coverage: float = 0.95
     sample_mode: str = "all"      # all | candidates (Donchian breakout bar closes only)
+    exit_mode: str = "live_trail"            # live_trail | static_barrier
+    rules: Optional[ExitRules] = None        # live_trail rules; None -> ExitRules.from_settings()
+
+    def live_rules(self) -> ExitRules:
+        return self.rules or ExitRules.from_settings()
 
     def to_dict(self):
-        return asdict(self)
+        d = asdict(self)
+        d["rules"] = self.live_rules().to_dict()
+        return d
 
 
 # ------------------------------------------------------------- bars / ATR --
@@ -138,6 +158,8 @@ def make_labels(snaps: pd.DataFrame, cfg: BarrierConfig, symbol: str) -> pd.Data
     from engine.decision import evaluate_bucket_a
     from gate.buckets import Dir
     snaps = snaps.sort_values("ts_ms").reset_index(drop=True)
+    if cfg.exit_mode == "live_trail":
+        return make_labels_live(snaps, cfg, symbol)
     ts = snaps["ts_ms"].to_numpy()
     o, h, l, c = (snaps[k].to_numpy(float) for k in ("open", "high", "low", "close"))
     bars = build_decision_bars(snaps, cfg.bar_s, cfg.snapshot_s, cfg.min_bar_coverage)
@@ -168,7 +190,53 @@ def make_labels(snaps: pd.DataFrame, cfg: BarrierConfig, symbol: str) -> pd.Data
                          t1, held, atr[i], atr[i] / c[i] * 100.0, int(i)))
     out = pd.DataFrame(rows, columns=["symbol", "ts_ms", "side", "y", "ret_atr", "cost_atr",
                                       "t1_ms", "held", "atr", "atr_pct", "row"])
+    out["net_r"] = (out["ret_atr"] - out["cost_atr"]) / cfg.sl_atr
+    out["cand"] = int(cfg.sample_mode == "candidates")
     return out
+
+
+def make_labels_live(snaps: pd.DataFrame, cfg: BarrierConfig, symbol: str) -> pd.DataFrame:
+    """
+    Parity labels: one row per (decision bar close, side). Decision points are bar closes ONLY
+    (that is when the live Decider runs); cfg.stride_s is ignored. Columns as make_labels plus
+    net_r (== PaperTrader r_multiple) and cand (1 if the live Bucket-A Donchian rule fires in
+    that direction on that bar, i.e. the trade the live gate would actually be asked about).
+    """
+    from engine.decision import evaluate_bucket_a
+    from gate.buckets import Dir
+    rules = cfg.live_rules()
+    bars = build_decision_bars(snaps, cfg.bar_s, cfg.snapshot_s, cfg.min_bar_coverage)
+    cols = ["symbol", "ts_ms", "side", "y", "ret_atr", "cost_atr", "t1_ms", "held", "atr", "atr_pct",
+            "row", "net_r", "cand", "exit_reason"]
+    if len(bars) < rules.atr_window + 2:
+        return pd.DataFrame(columns=cols)
+    bar_ms = cfg.bar_s * 1000
+    o, h, l, c = (bars[k].to_numpy(float) for k in ("open", "high", "low", "close"))
+    ot = bars["open_time"].to_numpy()
+    end_ts = bars["end_ts"].to_numpy()
+    atr = bar_atr(h, l, ot, rules.atr_window, bar_ms)
+    row_of = pd.Series(np.arange(len(snaps)), index=snaps["ts_ms"].to_numpy())
+    warm = snaps["warm"].to_numpy() == 1.0
+    hist = bars.to_dict("records")
+    rows = []
+    for i in range(len(bars) - 1):
+        r = row_of.get(int(end_ts[i]))
+        if r is None or not warm[r] or not np.isfinite(atr[i]):
+            continue
+        a, _ = evaluate_bucket_a(hist[:i + 1], None, hist[i]["close"])
+        cand_dir = 0 if a.direction == Dir.NEUTRAL else (1 if a.direction == Dir.LONG else -1)
+        if cfg.sample_mode == "candidates" and cand_dir == 0:
+            continue
+        for side in ((cand_dir,) if cfg.sample_mode == "candidates" else (1, -1)):
+            sim = simulate_trade(o, h, l, c, ot, atr, i, side, rules, bar_ms)
+            if sim is None:
+                continue
+            move = sim["gross_r"] * sim["stop_dist"] / atr[i]
+            cost = (sim["gross_r"] - sim["net_r"]) * sim["stop_dist"] / atr[i]
+            rows.append((symbol, int(end_ts[i]), side, label_from_net_r(sim["net_r"], rules.be_band_r),
+                         move, cost, int(end_ts[sim["exit_bar"]]), sim["held"], atr[i],
+                         atr[i] / c[i] * 100.0, int(r), sim["net_r"], int(cand_dir == side), sim["reason"]))
+    return pd.DataFrame(rows, columns=cols)
 
 
 def continuation_label(snaps: pd.DataFrame, cfg: BarrierConfig, lab: pd.DataFrame) -> pd.Series:

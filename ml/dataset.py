@@ -34,7 +34,8 @@ def build_dataset(store_path: str, symbols: list[str] | None, start_ms: int | No
             continue
         feats = g.iloc[lab["row"].to_numpy()][FEATURE_COLUMNS]
         X = to_model_frame(feats, lab["side"].to_numpy(), lab["atr_pct"].to_numpy())
-        parts.append(pd.concat([lab.drop(columns=["row", "side", "atr_pct"]).reset_index(drop=True), X], axis=1))
+        drop = [c for c in ("row", "side", "atr_pct", "exit_reason") if c in lab.columns]
+        parts.append(pd.concat([lab.drop(columns=drop).reset_index(drop=True), X], axis=1))
         log.info("%s: %d snapshots -> %d labelled rows", sym, len(g), len(lab))
     if not parts:
         raise RuntimeError("no labelled samples produced; need more recorded data "

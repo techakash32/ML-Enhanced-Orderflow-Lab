@@ -282,12 +282,27 @@ MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "")
 ML_ON_MISSING_FEATURES = os.environ.get("ML_ON_MISSING_FEATURES", "reject").strip().lower()
 ML_RELOAD_CHECK_S = float(os.environ.get("ML_RELOAD_CHECK_S", "300"))
 
+# Floor on holdout trades before a challenger may be promoted (below it => "needs_more_data")
+MIN_HOLDOUT_TRADES = int(os.environ.get("MIN_HOLDOUT_TRADES", "30"))
+# Refuse a model whose training exit rules differ from the live PaperTrader rules
+ML_ALLOW_EXIT_MISMATCH = _env_bool("ML_ALLOW_EXIT_MISMATCH", "false")
+
 # Order-flow feature recorder (needed for live ML inference and for training data)
 RECORD_FEATURES = _env_bool("RECORD_FEATURES", "true" if USE_ML_GATE else "false")
 FEATURE_STORE_PATH = os.environ.get("FEATURE_STORE_PATH", "logs/feature_store")
+# Symbols to RECORD (training data). May be wider than the traded SYMBOLS: the model is pooled
+# across symbols, so more liquid perps = more samples. Default: traded symbols only.
+FEATURE_SYMBOLS = [s.strip().upper() for s in
+                   os.environ.get("FEATURE_SYMBOLS", ",".join(SYMBOLS)).split(",") if s.strip()]
 FEATURE_SNAPSHOT_S = int(os.environ.get("FEATURE_SNAPSHOT_S", "60"))
 FEATURE_DEPTH_LEVELS = int(os.environ.get("FEATURE_DEPTH_LEVELS", "5"))
 WS_PUBLIC_BASE = os.environ.get("WS_PUBLIC_BASE", "wss://fstream.binance.com/public/stream?streams=")
+# split = two sockets (/market aggTrade + /public depth); combined = ONE socket on the legacy
+# /stream endpoint carrying both (use only if scripts/verify_endpoints.py shows it works)
+WS_RECORDER_MODE = os.environ.get("WS_RECORDER_MODE", "split").strip().lower()
+WS_COMBINED_BASE = os.environ.get("WS_COMBINED_BASE", "wss://fstream.binance.com/stream?streams=")
+FEATURE_FLUSH_S = int(os.environ.get("FEATURE_FLUSH_S", "300"))
+FEATURE_HEARTBEAT_PATH = os.environ.get("FEATURE_HEARTBEAT_PATH", "logs/ml/recorder_heartbeat.json")
 WS_MARKET_BASE = os.environ.get("WS_MARKET_BASE", "wss://fstream.binance.com/market/stream?streams=")
 
 

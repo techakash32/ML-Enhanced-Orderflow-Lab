@@ -77,12 +77,35 @@ class MLGate:
             log.error("ML model feature schema %s != code schema - refusing to use it",
                       manifest.get("feature_schema_hash"))
             return False
+        if not self._exit_rules_match(manifest):
+            return False
         self.booster, self.manifest, self.version = booster, manifest, ver
         self._stamp = self._local_stamp() if ver == "local" else ver
         log.info("ML gate loaded model %s (%s, trained %s, objective=%s)",
                  manifest.get("model_version"), ver, manifest.get("created_utc"),
                  manifest.get("objective"))
         return True
+
+    @staticmethod
+    def _exit_rules_match(manifest: dict) -> bool:
+        """Label/exit parity guard: the model must have been trained on the CURRENT live exit rules."""
+        trained = manifest.get("exit_rules")
+        if trained is None:
+            if manifest.get("exit_mode") == "static_barrier":
+                log.warning("ML model was trained on STATIC barriers, not the live trailing exit "
+                            "(label/exit mismatch) - edge may not translate to live P&L")
+            return True                                     # legacy / static-barrier bundle
+        from ml.exit_sim import ExitRules
+        live = ExitRules.from_settings().parity_key()
+        diff = {k: (trained.get(k), live[k]) for k in live if trained.get(k) != live[k]}
+        if not diff:
+            return True
+        msg = f"ML model exit rules differ from live settings (trained, live): {diff}"
+        if settings.ML_ALLOW_EXIT_MISMATCH:
+            log.warning("%s - allowed by ML_ALLOW_EXIT_MISMATCH", msg)
+            return True
+        log.error("%s - refusing to use the model (retrain, or set ML_ALLOW_EXIT_MISMATCH=true)", msg)
+        return False
 
     def _on_missing(self) -> None:
         if not self._warned:

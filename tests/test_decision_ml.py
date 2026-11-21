@@ -148,3 +148,22 @@ def test_promotion_rules():
     assert not decide_promotion(good, champ, "edge", 0.01, 0.0, 30)[0]                       # worse by .05
     assert decide_promotion({**good, "edge": 0.095}, champ, "edge", 0.01, 0.0, 30)[0]        # within tol
     assert decide_promotion({**good, "edge": 0.0}, champ, "edge", 0.01, 0.0, 30, force=True)[0]
+
+
+def test_gate_refuses_model_trained_on_different_exit_rules(tmp_path, monkeypatch):
+    import lightgbm as lgb
+    import pandas as pd
+    from ml.bundle import save_bundle
+    from ml.exit_sim import ExitRules
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(rng.normal(size=(200, len(MODEL_FEATURES))), columns=MODEL_FEATURES)
+    m = lgb.train({"objective": "binary", "verbosity": -1}, lgb.Dataset(X, (X.iloc[:, 0] > 0).astype(int)), 5)
+    base = {"model_version": "t", "feature_names": MODEL_FEATURES, "objective": "binary",
+            "favorable_index": None, "created_utc": "now", "exit_mode": "live_trail"}
+    good = ExitRules.from_settings().parity_key()
+    save_bundle(m, {**base, "exit_rules": good}, str(tmp_path / "ok"))
+    save_bundle(m, {**base, "exit_rules": {**good, "atr_mult": 3.5}}, str(tmp_path / "bad"))
+    assert MLGate(path=str(tmp_path / "ok"), source="local", tracking_uri="").available
+    assert not MLGate(path=str(tmp_path / "bad"), source="local", tracking_uri="").available
+    monkeypatch.setattr(settings, "ML_ALLOW_EXIT_MISMATCH", True)
+    assert MLGate(path=str(tmp_path / "bad"), source="local", tracking_uri="").available
