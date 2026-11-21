@@ -11,6 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
 ENV USE_ML_GATE=true \
     ML_MODEL_PATH=/app/logs/ml/models/champion \
     ML_GATE_THRESHOLD=0.55 \
+    FEATURE_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT \
     FEATURE_STORE_PATH=/app/logs/feature_store \
     MLFLOW_TRACKING_URI=sqlite:////app/logs/ml/mlruns/mlflow.db
 

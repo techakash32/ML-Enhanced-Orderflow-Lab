@@ -34,21 +34,21 @@ A snapshot is flagged `warm` after ~6 h of continuous data (VPIN window + z-scor
 trained and served only on warm rows.
 
 ## 2. Train the first model
-Needs roughly **2–4+ weeks** of recorded data with the default 4h bars (ATR warm-up of 14 bars = 2.3 days,
-the 6-bar vertical barrier = 24 h, plus the CV and holdout splits).
+Needs roughly **4+ weeks** of recorded data with the default 4h bars (ATR warm-up 2.3 days, up to 15 days for a trade
+to resolve, plus the CV and holdout splits; see docs/PARITY_REPORT.md).
 ```bash
-python -m ml.train --lookback-days 60            # defaults: TP 1.5×ATR, SL 1.0×ATR, 6-bar horizon
+python -m ml.train --lookback-days 60            # defaults: live-exit parity labels
 python -m ml.train --start 2026-12-01 --end 2027-01-20 --objective binary \
     --tp-atr 1.5 --sl-atr 1.0 --max-hold-bars 6 --threshold 0.58 --num-leaves 15 --max-depth 4
 python -m ml.train --help                        # all hyper-parameters
 ```
-What it does: triple-barrier labels (ATR-scaled; ATR defined exactly like `PaperTrader`, next-bar-open entry,
-stop wins ties) for **both sides** at every `--stride-s` (30 min), features sign-flipped for shorts so one model serves
-both → time-based holdout (last 20 %) → **purged walk-forward CV** with embargo on the rest → refit → evaluate on the
-holdout. It reports accuracy, per-class precision/recall, log-loss, AUC and the **economic metric**: win rate vs
-breakeven win rate `(SL + cost)/(TP + SL)` with a block-bootstrap 95 % CI, net expectancy in R, and the same numbers
-for the *ungated* baseline. `--sample-mode candidates` trains only on Donchian-breakout bar-closes (what the live gate
-actually sees; far fewer rows).
+What it does: labels every bar close for **both sides** with the outcome of a simulated live trade (see *Label/exit parity*
+below), features sign-flipped for shorts so one model serves both → time-based holdout (last 20 %) → **purged walk-forward CV**
+(purging by each trade's exit time, plus embargo) → refit → evaluate on the holdout. It reports accuracy, per-class
+precision/recall, log-loss, AUC and the **economic metric**: win rate vs breakeven win rate (`L/(W+L)` from the taken trades'
+average win/loss in R), net expectancy in R and a block-bootstrap 95 % CI, the same for the *ungated* baseline, and a
+**trade-count table** per threshold (all rows vs live-candidate rows). `--sample-mode candidates` trains only on Donchian
+bar-closes (what the live gate sees; far fewer rows). Promotion uses holdout `expectancy_r` (`--promotion-metric`).
 
 Artifacts: `logs/ml/models/runs/<run>/{model.txt, manifest.json, feature_importance.csv, report.json}`
 (manifest = feature order/types, objective, barrier geometry, training date, metrics). The first model that
@@ -97,16 +97,38 @@ schtasks /Create /SC WEEKLY /D SUN /ST 03:15 /TN "OrderflowRetrain" /TR "cmd /c 
 scikit-learn. `start.sh` starts paper-live (+recorder) and the dashboard as before; `MLFLOW_SERVER` and
 `ENABLE_RETRAIN_LOOP` are opt-in and cannot take the trader down. Flow: Binance WS → recorder → ML gate → PaperTrader → dashboard.
 
+## Label/exit parity (Phase 6.1) — the rule
+Labels are the outcome of a **simulated live trade** (same entry, 2×ATR initial + trailing stop, 90-bar time stop, costs), not
+static barriers. Parameters come from `config/settings.py` (what `PaperTrader` reads); `tests/test_exit_parity.py` replays paths
+through the real `PaperTrader` to prove equality; each model stores its `exit_rules` and the live gate refuses a mismatch.
+Details and the trade-count analysis: [docs/PARITY_REPORT.md](docs/PARITY_REPORT.md). `--exit-mode static_barrier` is research-only.
+
+## Endpoints (Phase 6.2) — **not yet verified against the live service**
+The recorder uses (`config/settings.py`, overridable by env): `wss://fstream.binance.com/market/stream?streams=<sym>@aggTrade`
+and `wss://fstream.binance.com/public/stream?streams=<sym>@depth5@100ms` (Binance's /public /market /private split).
+**Before starting a multi-week recording, on a machine with internet run:**
+```bash
+python scripts/verify_endpoints.py            # PASS/FAIL per URL, incl. depth20, raw @trade and the legacy single-socket /stream
+python -m features.recorder --dry-run         # prints real trade + depth messages, writes nothing
+```
+If the legacy combined socket passes you may set `WS_RECORDER_MODE=combined` (one connection). Record the working URLs in
+`docs/ML_LIVE_LOG.md` and re-verify if Binance changes the split. (This sandbox's network blocks Binance, so only the failure
+path of the script and a local fake-server test of the recorder were exercised.)
+
+## Health, compose, Render
+`GET /health` (also a badge on the dashboard): uptime, last feature timestamp/age, recorder heartbeat, last paper trade, model
+present/champion version/parity flag, last retrain status; `status: degraded` if the recorder heartbeat is stale while recording
+is expected. `docker-compose.yml` runs trader + MLflow UI (+ optional retrain profile); `render.yaml` is an example blueprint —
+**mount the persistent disk at `/app/logs`** (all state lives there), Starter plan or higher. `scripts/smoke_deploy.sh` automates the
+10 smoke checks on a machine with internet + Docker.
+
 ## Things to know before trusting a number
-* **Label ≠ exit.** The model predicts the barrier outcome (TP 1.5 ATR / SL 1.0 ATR / 6 bars). Live exits are the
-  existing 2×ATR *trailing* stop with a 90-bar time stop. They are correlated, not identical; judge the gate by live
-  paper PnL, not only by the barrier metric. Align `--tp-atr/--sl-atr/--max-hold-bars` with how you want to trade.
-* **Overlapping labels.** Sub-bar sampling (30 min stride on 4h-ATR barriers) gives more rows but they are serially
-  correlated; purging/embargo prevent leakage, the bootstrap uses blocks, but effective sample size is far below row count.
+* **Overlapping labels.** A trade can last up to 90 bars, so neighbouring labels overlap heavily; purging uses each trade's
+  exit time and the bootstrap uses blocks, but the effective sample size is far below the row count.
 * **Threshold semantics.** P(+1) is a probability only if not re-weighted (`--class-weight none`, the default). With
   base rate ≈ SL/(TP+SL) = 40 %, 0.55 demands a large lift and may select very few trades; check `report.json` thresholds.
-* **Few trades.** Donchian + London-only on 4 symbols is a handful of candidates per month; the holdout may take too
-  few trades to clear `--min-holdout-trades`. Lower it knowingly, or use longer history.
+* **Few trades.** Live candidates (Donchian + London) are rare; below `MIN_HOLDOUT_TRADES` (30) no challenger is promoted
+  (`needs_more_data`). See docs/PARITY_REPORT.md for the levers.
 * `tests/` uses synthetic data (`ml/synthetic.py`) only to prove the plumbing; its metrics mean nothing about markets.
 
 Tests: `python -m pytest tests -q`

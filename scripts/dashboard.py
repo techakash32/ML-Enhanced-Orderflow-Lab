@@ -97,6 +97,12 @@ def get_latest_data():
         "equity_curve": curve
     }
 
+@app.get("/health")
+def health_endpoint():
+    from scripts.health import health
+    return health()
+
+
 @app.get("/api/dashboard")
 def dashboard_data():
     return get_latest_data()

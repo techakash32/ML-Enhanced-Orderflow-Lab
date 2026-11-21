@@ -1,0 +1,15 @@
+# Render blueprint (example). A persistent disk requires a paid instance (Starter+).
+# State lives under /app/logs, so the disk is mounted THERE (paper state, feature store,
+# models and MLflow db all persist). Start with USE_ML_GATE=false until a champion exists.
+services:
+  - type: web
+    name: orderflow-edge-lab
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    disk: {name: state, mountPath: /app/logs, sizeGB: 5}
+    envVars:
+      - {key: USE_ML_GATE, value: "false"}
+      - {key: RECORD_FEATURES, value: "true"}
+      - {key: ENABLE_RETRAIN_LOOP, value: "true"}
+      - {key: RETRAIN_EVERY_DAYS, value: "7"}

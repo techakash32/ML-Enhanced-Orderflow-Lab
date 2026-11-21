@@ -1,0 +1,33 @@
+# docker compose up --build
+#   trader : paper-live + feature recorder + dashboard (http://localhost:8000, /health)
+#   mlflow : tracking UI on http://localhost:5000 (SQLite backend shared via ./state)
+# All state (paper trades, feature store, models, mlruns) lives in ./state  ->  /app/logs.
+# Linux: `mkdir -p state && sudo chown -R 1000:1000 state` if the container user cannot write.
+services:
+  trader:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      USE_ML_GATE: ${USE_ML_GATE:-true}          # no champion yet => automatic rule-based fallback
+      ML_GATE_THRESHOLD: ${ML_GATE_THRESHOLD:-0.55}
+    volumes: ["./state:/app/logs"]
+    restart: unless-stopped
+  mlflow:
+    build: .
+    command: >
+      python -m mlflow server
+      --backend-store-uri sqlite:////app/logs/ml/mlruns/mlflow.db
+      --default-artifact-root /app/logs/ml/mlruns/artifacts
+      --host 0.0.0.0 --port 5000
+    ports: ["5000:5000"]
+    volumes: ["./state:/app/logs"]
+    entrypoint: []
+    depends_on: [trader]
+    restart: unless-stopped
+  retrain:                                       # optional: docker compose --profile retrain up -d
+    build: .
+    profiles: ["retrain"]
+    command: python -m ml.retrain --loop --every-days 7
+    entrypoint: []
+    volumes: ["./state:/app/logs"]
+    restart: unless-stopped

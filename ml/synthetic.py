@@ -52,3 +52,14 @@ def build_synthetic_store(root: str, symbol: str = "SYNTHUSDT", days: float = 3.
         else:
             eng.on_book(ev[1], ev[2], ev[3])
     return store.flush()
+
+
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="Build a SYNTHETIC feature store (pipeline smoke test only)")
+    ap.add_argument("--root", default="logs/synthetic_store")
+    ap.add_argument("--days", type=float, default=14)
+    ap.add_argument("--seed", type=int, default=0)
+    a = ap.parse_args()
+    build_synthetic_store(a.root, days=a.days, seed=a.seed)
+    print("synthetic store written to", a.root, "(symbol SYNTHUSDT, 15m-compatible)")
