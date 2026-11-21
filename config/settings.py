@@ -261,6 +261,37 @@ FILL_GAP_MAX_BARS = int(os.getenv("FILL_GAP_MAX_BARS", "288"))
 
 
 # =====================================================================
+# ML entry gate (LightGBM) - see ML_README.md
+# =====================================================================
+# The ML model replaces the rule-based confirmation step only. Bucket A still
+# proposes the candidate direction; PaperTrader / exits are untouched.
+
+def _env_bool(name: str, default: str) -> bool:
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+USE_ML_GATE = _env_bool("USE_ML_GATE", "false")        # false => original rule-based gate
+ML_MODEL_PATH = os.environ.get("ML_MODEL_PATH", "logs/ml/models/champion")
+ML_GATE_THRESHOLD = float(os.environ.get("ML_GATE_THRESHOLD", "0.55"))
+# auto: registry champion if MLFLOW_TRACKING_URI is set and has one, else local path
+ML_MODEL_SOURCE = os.environ.get("ML_MODEL_SOURCE", "auto").strip().lower()
+ML_REGISTERED_MODEL = os.environ.get("ML_REGISTERED_MODEL", "orderflow_lgbm")
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "")
+# What to do when the model is loaded but live features are missing/not warm:
+#   reject   - stand aside (fail closed, default)
+#   fallback - use the rule-based gate for that bar
+ML_ON_MISSING_FEATURES = os.environ.get("ML_ON_MISSING_FEATURES", "reject").strip().lower()
+ML_RELOAD_CHECK_S = float(os.environ.get("ML_RELOAD_CHECK_S", "300"))
+
+# Order-flow feature recorder (needed for live ML inference and for training data)
+RECORD_FEATURES = _env_bool("RECORD_FEATURES", "true" if USE_ML_GATE else "false")
+FEATURE_STORE_PATH = os.environ.get("FEATURE_STORE_PATH", "logs/feature_store")
+FEATURE_SNAPSHOT_S = int(os.environ.get("FEATURE_SNAPSHOT_S", "60"))
+FEATURE_DEPTH_LEVELS = int(os.environ.get("FEATURE_DEPTH_LEVELS", "5"))
+WS_PUBLIC_BASE = os.environ.get("WS_PUBLIC_BASE", "wss://fstream.binance.com/public/stream?streams=")
+WS_MARKET_BASE = os.environ.get("WS_MARKET_BASE", "wss://fstream.binance.com/market/stream?streams=")
+
+
+# =====================================================================
 # DIAGNOSTIC FEE OVERRIDE — must be at the very bottom
 # =====================================================================
 # This is the only place PAPER_FEE_* is allowed to be overridden. Everything
