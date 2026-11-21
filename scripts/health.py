@@ -30,6 +30,35 @@ def _read_json(path):
         return None
 
 
+def _gate_state(out: dict, now: float) -> dict:
+    """Human-readable gate status: ACTIVE (p=..) / STAND-ASIDE (reason) / FALLBACK (no model) / OFF."""
+    if not settings.USE_ML_GATE:
+        return {"state": "rules", "line": "ML gate: OFF (rule-based gate)"}
+    if not out["model"]["present"]:
+        return {"state": "fallback", "reason": "missing_model", "line": "ML gate: FALLBACK (no model - rule-based gate)"}
+    rec = out.get("recorder")
+    if not rec or rec["heartbeat_age_s"] > 180:                       # live, between bars
+        age = (rec or {}).get("last_feature_age_s")
+        txt = f"stale features, {age:.0f}s old" if age is not None else "stale features, no recorder heartbeat"
+        return {"state": "stand_aside", "reason": "stale_features", "line": f"ML gate: STAND-ASIDE ({txt})"}
+    per = _read_json(settings.GATE_STATE_PATH) or {}
+    if not per:
+        return {"state": "active", "line": "ML gate: ACTIVE (waiting for first decision)"}
+    sym, g = max(per.items(), key=lambda kv: kv[1].get("ts", 0))
+    st, why, p = g.get("gate_state"), (g.get("reason") or "").replace("_", " "), g.get("p")
+    if st == "active":
+        line = f"ML gate: ACTIVE (p={p:.2f}, {sym} trade)" if p is not None else "ML gate: ACTIVE"
+    elif st == "idle":
+        line = "ML gate: ACTIVE (no candidate on last bar)"
+    elif st == "stand_aside":
+        extra = f", {g['feature_age_s']:.0f}s old" if g.get("feature_age_s") is not None else ""
+        extra = f", p={p:.2f} < {g.get('threshold') or 0:.2f}" if p is not None else extra
+        line = f"ML gate: STAND-ASIDE ({why}{extra})"
+    else:
+        line = f"ML gate: FALLBACK ({why or 'rule-based'})"
+    return {"state": st, "reason": g.get("reason"), "last": g, "symbols": per, "line": line}
+
+
 def health(now=None) -> dict:
     now = now or time.time()
     out = {"uptime_s": int(now - _START), "interval": settings.INTERVAL, "symbols": settings.SYMBOLS,
@@ -63,6 +92,10 @@ def health(now=None) -> dict:
     rt = _last_json_line(os.path.join(os.path.dirname(settings.ML_MODEL_PATH.rstrip("/\\")), "retrain_history.jsonl"))
     out["last_retrain"] = ({"started": rt.get("started"), "status": rt.get("status"),
                             "promoted": rt.get("promoted"), "reason": rt.get("reason")} if rt else None)
+    out["gate_state"] = _gate_state(out, now)
+    mon = _read_json(settings.MONITOR_PATH)
+    out["monitor"] = ({"ts": mon.get("ts"), "any_flag": mon.get("any_flag"), "flags": mon.get("flags"),
+                       "summary": mon.get("summary")} if mon else None)
     expected = settings.RECORD_FEATURES or settings.USE_ML_GATE
     stale = expected and (not out["recorder"] or out["recorder"]["heartbeat_age_s"] > 180)
     out["status"] = "degraded" if stale else "ok"

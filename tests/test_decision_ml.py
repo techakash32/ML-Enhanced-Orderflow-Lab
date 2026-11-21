@@ -94,7 +94,7 @@ def test_no_signal_means_ml_never_consulted():
 def test_missing_or_cold_features_fail_closed_then_fallback_option(monkeypatch):
     hist = make_hist()
     d = Decider(use_ml=True, ml_gate=Stub(0.99)).decide(hist, 105.0, features=None)
-    assert not d.allowed and "no warm order-flow features" in d.reason
+    assert not d.allowed and "stale_features" in d.reason
     d = Decider(use_ml=True, ml_gate=Stub(0.99)).decide(hist, 105.0, features=feats(warm=0.0))
     assert not d.allowed
     assert ml_diagnostics_snapshot()["ml_no_features"] == 2

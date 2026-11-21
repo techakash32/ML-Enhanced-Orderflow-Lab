@@ -65,6 +65,7 @@ def test_runner_uses_ml_gate_with_recorder_features(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "ACTIVE_STRATEGY", "trend")
     monkeypatch.setattr(settings, "TREND_LONDON_ONLY", False)
     monkeypatch.setattr(settings, "USE_ML_GATE", True)
+    monkeypatch.setattr(settings, "ML_MAX_FEATURE_AGE_S", 0)      # synthetic timestamps are old
     monkeypatch.setattr(settings, "ML_GATE_THRESHOLD", 0.5)
 
     # always-bullish tiny model (predicts P=high for every row)

@@ -180,6 +180,15 @@ class LiveTrendRunner:
             # snapshot stamped at this bar's close boundary (events strictly before it)
             features = self.recorder.features_asof(self.symbol, bar["open_time"] + settings.INTERVAL_MS)
         decision = self.decider.decide(history, bar["close"], features=features)
+        if settings.USE_ML_GATE:
+            try:                                   # telemetry must never affect trading
+                from ml import telemetry
+                telemetry.write_gate_state(self.symbol, decision, bar["open_time"])
+                scores = self.decider.shadow_scores(history, bar["close"], features)
+                if scores:
+                    telemetry.log_shadow(self.symbol, bar["open_time"], scores, decision)
+            except Exception:
+                log.exception("%s ML telemetry failed (ignored)", self.symbol)
 
         if decision.warmup:
             self.stats["warmup"] += 1
@@ -196,6 +205,7 @@ class LiveTrendRunner:
                 "ts": bar["open_time"], "symbol": self.symbol,
                 "direction": direction.value, "close": bar["close"],
                 "reason": reason, "gate": decision.gate_mode, "ml_p": decision.ml_p,
+                "gate_state": decision.gate_state, "gate_reason": decision.gate_reason,
             }
             with open(SIGNALS_LOG, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")

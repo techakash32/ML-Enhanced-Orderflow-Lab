@@ -281,6 +281,11 @@ MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "")
 #   fallback - use the rule-based gate for that bar
 ML_ON_MISSING_FEATURES = os.environ.get("ML_ON_MISSING_FEATURES", "reject").strip().lower()
 ML_RELOAD_CHECK_S = float(os.environ.get("ML_RELOAD_CHECK_S", "300"))
+# Live features older than this (seconds past the bar-close stamp) => stand aside (0 disables)
+GATE_STATE_PATH = os.environ.get("GATE_STATE_PATH", "logs/ml/gate_state.json")
+GATE_LOG_PATH = os.environ.get("GATE_LOG_PATH", "logs/ml/gate_log.jsonl")
+MONITOR_PATH = os.environ.get("MONITOR_PATH", "logs/ml/monitor.json")
+ML_MAX_FEATURE_AGE_S = float(os.environ.get("ML_MAX_FEATURE_AGE_S", "180"))
 
 # Floor on holdout trades before a challenger may be promoted (below it => "needs_more_data")
 MIN_HOLDOUT_TRADES = int(os.environ.get("MIN_HOLDOUT_TRADES", "30"))

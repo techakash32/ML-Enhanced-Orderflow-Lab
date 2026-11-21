@@ -8,8 +8,10 @@ cooldown).
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
+import time
 
 from config import settings
+from features.orderflow import FEATURE_COLUMNS
 from features.volume_profile import compute_volume_profile
 from gate.buckets import BucketSignal, Dir
 from gate.confirmation_gate import (
@@ -197,6 +199,11 @@ class Decision:
     gate_mode: str = "rules"
     ml_p: float | None = None
     ml_threshold: float | None = None
+    # Observable gate state (Phase 7.2): active | idle | stand_aside | fallback | rules
+    gate_state: str = "rules"
+    # stale_features | feature_nan | below_threshold | missing_model | c_veto | no_candidate | ""
+    gate_reason: str = ""
+    feature_age_s: float | None = None
 
 
 NEUTRAL_C = BucketSignal("C", Dir.NEUTRAL, 0.0, "not wired")
@@ -212,6 +219,7 @@ class Decider:
         ml_gate: inject an ml.gate.MLGate (tests); otherwise created lazily.
         """
         self.cooldown = 0
+        self._gs = {"gate_state": "rules", "gate_reason": "", "feature_age_s": None}
         self.use_ml = settings.USE_ML_GATE if use_ml is None else bool(use_ml)
         self._ml = ml_gate
 
@@ -235,6 +243,37 @@ class Decider:
         gate.maybe_reload()
         return gate if gate.available else None
 
+    def shadow_scores(self, hist, close, features):
+        """Model P(favourable) for BOTH sides at this bar close (monitoring only; never trades).
+        None if the ML gate is off/unavailable or features are unusable."""
+        gate = self._ml_active() if self.use_ml else None
+        if gate is None:
+            return None
+        atr = _atr_abs(hist, settings.TREND_ATR_WINDOW)
+        why, _ = self._feature_problem(features, atr, close)
+        if why:
+            return None
+        pct = atr / close * 100.0
+        return {"p_long": gate.p_favorable(features, 1, pct), "p_short": gate.p_favorable(features, -1, pct)}
+
+    @staticmethod
+    def _feature_problem(features, atr, close):
+        """-> (reason_code | None, feature_age_s). Reason: stale_features | feature_nan."""
+        if not features:
+            return "stale_features", None                    # recorder down / gap / no snapshot
+        age = None
+        if features.get("ts_ms") is not None and settings.ML_MAX_FEATURE_AGE_S > 0:
+            age = max(0.0, time.time() - features["ts_ms"] / 1000.0)
+            if age > settings.ML_MAX_FEATURE_AGE_S:
+                return "stale_features", age
+        if atr is None or atr <= 0 or not close or close <= 0:
+            return "feature_nan", age                        # not enough bars for ATR
+        vals = [features.get(k) for k in FEATURE_COLUMNS]
+        nan_frac = sum(1 for v in vals if v is None or v != v) / len(vals)
+        if not features.get("warm") or nan_frac > 0.3:
+            return "feature_nan", age                        # still warming up / mostly NaN
+        return None, age
+
     def _ml_confirm(self, gate, a, c_sig, veto_fn, close, hist, features):
         """
         Replaces the rule-based CONFIRMATION (buckets A/B agreement) with
@@ -243,32 +282,41 @@ class Decider:
         Returns (allowed, direction, reason, p_or_None, mode).
         """
         thr = settings.ML_GATE_THRESHOLD
+        self._gs = {"gate_state": "idle", "gate_reason": "no_candidate", "feature_age_s": None}
         if a.direction == Dir.NEUTRAL:
             return False, None, f"STAND ASIDE - A neutral ({a.reason})", None, "ml"
         if c_sig.direction != Dir.NEUTRAL and c_sig.direction != a.direction:
+            self._gs.update(gate_state="stand_aside", gate_reason="c_veto")
             return False, None, f"STAND ASIDE - C veto ({c_sig.direction.value} vs {a.direction.value})", None, "ml"
         if veto_fn is not None and close is not None:
             vetoed, veto_reason = veto_fn(a.direction, close)
             if vetoed:
+                self._gs.update(gate_state="stand_aside", gate_reason="c_veto")
                 return False, None, f"STAND ASIDE - C wall veto: {veto_reason}", None, "ml"
         _ML_DIAG["ml_evaluated"] += 1
         atr = _atr_abs(hist, settings.TREND_ATR_WINDOW)
-        if (not features or not features.get("warm") or atr is None or atr <= 0 or close <= 0):
+        why, age = self._feature_problem(features, atr, close)
+        if why:
+            self._gs.update(gate_state="stand_aside", gate_reason=why, feature_age_s=age)
             _ML_DIAG["ml_no_features"] += 1
             if settings.ML_ON_MISSING_FEATURES == "fallback":
                 _ML_DIAG["ml_fallback_rules"] += 1
+                self._gs.update(gate_state="fallback")
                 return None, None, "", None, "rules"
+            age_txt = f", {age:.0f}s old" if age is not None else ""
             return (False, None,
-                    f"STAND ASIDE - ML gate has no warm order-flow features (would be {a.direction.value})",
+                    f"STAND ASIDE - ML gate: {why}{age_txt} (would be {a.direction.value})",
                     None, "ml")
         side = 1 if a.direction == Dir.LONG else -1
         p = gate.p_favorable(features, side, atr / close * 100.0)
+        self._gs = {"gate_state": "active", "gate_reason": "", "feature_age_s": age}
         if p > thr:
             _ML_DIAG["ml_passed"] += 1
             return (True, a.direction,
                     f"TRADE {a.direction.value} - A: {a.reason} | ML P(target first)={p:.3f} > {thr:.2f}",
                     p, "ml")
         _ML_DIAG["ml_below_threshold"] += 1
+        self._gs = {"gate_state": "stand_aside", "gate_reason": "below_threshold", "feature_age_s": age}
         return (False, None,
                 f"STAND ASIDE - ML P(target first)={p:.3f} <= {thr:.2f} (A={a.direction.value})",
                 p, "ml")
@@ -310,6 +358,9 @@ class Decider:
 
         gate_mode, ml_p = "rules", None
         ml = None if warmup_replay else self._ml_active()
+        self._gs = {"gate_state": "rules", "gate_reason": "", "feature_age_s": None}
+        if self.use_ml and not warmup_replay and ml is None:
+            self._gs = {"gate_state": "fallback", "gate_reason": "missing_model", "feature_age_s": None}
         if ml is not None:
             allowed, direction, reason, ml_p, gate_mode = self._ml_confirm(
                 ml, a, c_sig, veto_fn, close, hist, features)
@@ -353,7 +404,8 @@ class Decider:
             delta_ratio=absorption["delta_ratio"],
             compression_ratio=absorption["compression_ratio"],
             distance_to_level_pct=absorption["distance_to_level_pct"],
-            gate_mode=gate_mode, ml_p=ml_p,
+            gate_mode=gate_mode, ml_p=ml_p, gate_state=self._gs["gate_state"],
+            gate_reason=self._gs["gate_reason"], feature_age_s=self._gs["feature_age_s"],
             ml_threshold=settings.ML_GATE_THRESHOLD if gate_mode == "ml" else None,
         )
 
