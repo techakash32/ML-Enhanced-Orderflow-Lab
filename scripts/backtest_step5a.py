@@ -108,7 +108,9 @@ def run_gate(segments: list) -> list:
                    settings.TREND_ATR_WINDOW) + 1
     out = []
     for seg in segments:
-        decider = Decider()                    # fresh warmup + cooldown per stretch
+        # Historical bars carry no order-book features, so the backtest always uses the
+        # rule-based gate regardless of USE_ML_GATE (the ML gate is evaluated by ml.train).
+        decider = Decider(use_ml=False)        # fresh warmup + cooldown per stretch
         sigs = []
         for i, bar in enumerate(seg):
             if bar.get("synthetic"):

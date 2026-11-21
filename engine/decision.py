@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 _SWEEP_DIAG = {"total_bars": 0, "sweep_signals": 0, "filtered_short_long_only": 0}
 _FUNDING_DIAG = {"bars_with_snapshot": 0, "extreme_signals": 0, "missing_snapshot": 0}
 _DECIDE_DIAG = {"called": 0, "atr_reject": 0, "vp_none": 0, "other_reject": 0}
+_ML_DIAG = {"ml_evaluated": 0, "ml_passed": 0, "ml_below_threshold": 0,
+            "ml_no_features": 0, "ml_fallback_rules": 0}
 
 
 def reset_sweep_diagnostics():
@@ -31,6 +33,8 @@ def reset_sweep_diagnostics():
         _FUNDING_DIAG[key] = 0
     for key in _DECIDE_DIAG:
         _DECIDE_DIAG[key] = 0
+    for key in _ML_DIAG:
+        _ML_DIAG[key] = 0
 
 
 def sweep_diagnostics_snapshot():
@@ -44,6 +48,10 @@ absorption_diagnostics_snapshot = sweep_diagnostics_snapshot
 
 def decision_diagnostics_snapshot():
     return dict(_DECIDE_DIAG)
+
+
+def ml_diagnostics_snapshot():
+    return dict(_ML_DIAG)
 
 
 def funding_diagnostics_snapshot():
@@ -185,6 +193,10 @@ class Decision:
     delta_ratio: float | None = None
     compression_ratio: float | None = None
     distance_to_level_pct: float | None = None
+    # ML gate (None / "rules" when the original rule-based gate decided)
+    gate_mode: str = "rules"
+    ml_p: float | None = None
+    ml_threshold: float | None = None
 
 
 NEUTRAL_C = BucketSignal("C", Dir.NEUTRAL, 0.0, "not wired")
@@ -193,13 +205,82 @@ NEUTRAL_C = BucketSignal("C", Dir.NEUTRAL, 0.0, "not wired")
 class Decider:
     """Holds the only state the gate has: the post-signal cooldown counter."""
 
-    def __init__(self):
+    def __init__(self, use_ml: bool | None = None, ml_gate=None):
+        """
+        use_ml: None -> settings.USE_ML_GATE. False forces the original rule-based
+                gate (the backtest does this: historical bars carry no order-book features).
+        ml_gate: inject an ml.gate.MLGate (tests); otherwise created lazily.
+        """
         self.cooldown = 0
+        self.use_ml = settings.USE_ML_GATE if use_ml is None else bool(use_ml)
+        self._ml = ml_gate
 
-    def decide(self, hist: list, close: float, bucket_c=None) -> Decision:
+    # ---- ML gate plumbing -------------------------------------------------
+    def _ml_gate(self):
+        if self._ml is None:
+            try:
+                from ml.gate import MLGate          # lazy: lightgbm only needed if enabled
+                self._ml = MLGate()
+            except Exception as exc:               # missing deps must never stop the trader
+                log.warning("ML gate unavailable (%s) - using rule-based gate", exc)
+                self._ml = False
+        return self._ml
+
+    def _ml_active(self):
+        if not self.use_ml:
+            return None
+        gate = self._ml_gate()
+        if not gate:
+            return None
+        gate.maybe_reload()
+        return gate if gate.available else None
+
+    def _ml_confirm(self, gate, a, c_sig, veto_fn, close, hist, features):
+        """
+        Replaces the rule-based CONFIRMATION (buckets A/B agreement) with
+        P(target first) > threshold. Bucket A still proposes the direction and the
+        optional Bucket C (GEX) veto is kept as a hard risk overlay.
+        Returns (allowed, direction, reason, p_or_None, mode).
+        """
+        thr = settings.ML_GATE_THRESHOLD
+        if a.direction == Dir.NEUTRAL:
+            return False, None, f"STAND ASIDE - A neutral ({a.reason})", None, "ml"
+        if c_sig.direction != Dir.NEUTRAL and c_sig.direction != a.direction:
+            return False, None, f"STAND ASIDE - C veto ({c_sig.direction.value} vs {a.direction.value})", None, "ml"
+        if veto_fn is not None and close is not None:
+            vetoed, veto_reason = veto_fn(a.direction, close)
+            if vetoed:
+                return False, None, f"STAND ASIDE - C wall veto: {veto_reason}", None, "ml"
+        _ML_DIAG["ml_evaluated"] += 1
+        atr = _atr_abs(hist, settings.TREND_ATR_WINDOW)
+        if (not features or not features.get("warm") or atr is None or atr <= 0 or close <= 0):
+            _ML_DIAG["ml_no_features"] += 1
+            if settings.ML_ON_MISSING_FEATURES == "fallback":
+                _ML_DIAG["ml_fallback_rules"] += 1
+                return None, None, "", None, "rules"
+            return (False, None,
+                    f"STAND ASIDE - ML gate has no warm order-flow features (would be {a.direction.value})",
+                    None, "ml")
+        side = 1 if a.direction == Dir.LONG else -1
+        p = gate.p_favorable(features, side, atr / close * 100.0)
+        if p > thr:
+            _ML_DIAG["ml_passed"] += 1
+            return (True, a.direction,
+                    f"TRADE {a.direction.value} - A: {a.reason} | ML P(target first)={p:.3f} > {thr:.2f}",
+                    p, "ml")
+        _ML_DIAG["ml_below_threshold"] += 1
+        return (False, None,
+                f"STAND ASIDE - ML P(target first)={p:.3f} <= {thr:.2f} (A={a.direction.value})",
+                p, "ml")
+
+    def decide(self, hist: list, close: float, bucket_c=None, features: dict | None = None,
+               warmup_replay: bool = False) -> Decision:
         """
         hist: finalized bars, the just-closed bar LAST.
         bucket_c: (BucketSignal, veto_fn | None) or None.
+        features: order-flow snapshot stamped at this bar's close (features.orderflow row);
+                  only read by the ML gate.
+        warmup_replay: state warm-up over historical bars (no features exist) - always rules.
         """
         _DECIDE_DIAG["called"] += 1
         if settings.ATR_FILTER_ENABLED:
@@ -227,11 +308,17 @@ class Decider:
         b = evaluate_bucket_b(hist, window=settings.AGGR_WINDOW_BARS)
         c_sig, veto_fn = bucket_c if bucket_c else (NEUTRAL_C, None)
 
-        allowed, direction, reason = confirmation_gate(
-            a, b, c_sig, veto_fn=veto_fn, close=close,
-            min_aggr_strength=settings.MIN_AGGRESSION_STRENGTH,
-            strategy=getattr(settings, "ACTIVE_STRATEGY", "sweep"),
-        )
+        gate_mode, ml_p = "rules", None
+        ml = None if warmup_replay else self._ml_active()
+        if ml is not None:
+            allowed, direction, reason, ml_p, gate_mode = self._ml_confirm(
+                ml, a, c_sig, veto_fn, close, hist, features)
+        if ml is None or gate_mode == "rules":      # original rule-based gate (also the fallback)
+            allowed, direction, reason = confirmation_gate(
+                a, b, c_sig, veto_fn=veto_fn, close=close,
+                min_aggr_strength=settings.MIN_AGGRESSION_STRENGTH,
+                strategy=getattr(settings, "ACTIVE_STRATEGY", "sweep"),
+            )
 
         # Never trade on a volume profile that contains approximated bars.
         approx_frac = approx / len(vp_bars) if vp_bars else 0.0
@@ -266,7 +353,16 @@ class Decider:
             delta_ratio=absorption["delta_ratio"],
             compression_ratio=absorption["compression_ratio"],
             distance_to_level_pct=absorption["distance_to_level_pct"],
+            gate_mode=gate_mode, ml_p=ml_p,
+            ml_threshold=settings.ML_GATE_THRESHOLD if gate_mode == "ml" else None,
         )
+
+def _atr_abs(history: list, window: int):
+    """Mean high-low over the last `window` bars - identical to PaperTrader._average_range."""
+    if len(history) < window:
+        return None
+    return sum(float(b["high"]) - float(b["low"]) for b in history[-window:]) / window
+
 
 def _atr_pct(history: list, window: int = 14):
     """Mean high-low range as a percentage of close over recent bars."""

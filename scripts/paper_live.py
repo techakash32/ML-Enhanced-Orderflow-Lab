@@ -21,7 +21,8 @@ from datetime import datetime, timezone
 
 from config import settings
 from data.ws_manager import BinanceMarketStream
-from engine.decision import Decider
+from engine.decision import Decider, ml_diagnostics_snapshot
+from features.recorder import FeatureRecorder
 from execution.paper_trader import PaperTrader
 
 log = logging.getLogger("paper_live")
@@ -92,8 +93,9 @@ def fetch_recent_closed_bars(symbol: str, limit: int = PRELOAD_BARS) -> list[dic
 class LiveTrendRunner:
     """Independent warmup, decision state, and PaperTrader per symbol."""
 
-    def __init__(self, symbol: str):
+    def __init__(self, symbol: str, recorder: FeatureRecorder | None = None):
         self.symbol = symbol
+        self.recorder = recorder          # order-flow features for the ML gate (optional)
         self.history: deque[dict] = deque(maxlen=HISTORY_LIMIT)
         self.decider = Decider()
         self.trader = PaperTrader(
@@ -108,7 +110,8 @@ class LiveTrendRunner:
         """Replay gate history for warmup/cooldown without creating old entries."""
         for i, bar in enumerate(bars):
             start = max(0, i - HISTORY_LIMIT + 1)
-            self.decider.decide(bars[start:i + 1], bar["close"])
+            # warmup_replay: historical bars have no order-flow features -> rule path only
+            self.decider.decide(bars[start:i + 1], bar["close"], warmup_replay=True)
 
     async def preload(self) -> None:
         try:
@@ -172,7 +175,11 @@ class LiveTrendRunner:
         self.history.append(bar)
         self.stats["bars"] += 1
         history = list(self.history)
-        decision = self.decider.decide(history, bar["close"])
+        features = None
+        if self.recorder is not None:
+            # snapshot stamped at this bar's close boundary (events strictly before it)
+            features = self.recorder.features_asof(self.symbol, bar["open_time"] + settings.INTERVAL_MS)
+        decision = self.decider.decide(history, bar["close"], features=features)
 
         if decision.warmup:
             self.stats["warmup"] += 1
@@ -188,7 +195,7 @@ class LiveTrendRunner:
             record = {
                 "ts": bar["open_time"], "symbol": self.symbol,
                 "direction": direction.value, "close": bar["close"],
-                "reason": reason,
+                "reason": reason, "gate": decision.gate_mode, "ml_p": decision.ml_p,
             }
             with open(SIGNALS_LOG, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")
@@ -207,13 +214,17 @@ class LiveTrendRunner:
         try:
             await stream.run()
         finally:
-            log.info("%s final paper-live stats: %s", self.symbol, self.stats)
+            log.info("%s final paper-live stats: %s | ml gate: %s", self.symbol, self.stats,
+                     ml_diagnostics_snapshot())
 
 
 async def main() -> None:
     validate_config()
     os.makedirs(LOG_DIR, exist_ok=True)
-    runners = [LiveTrendRunner(symbol) for symbol in settings.SYMBOLS]
+    recorder = None
+    if settings.RECORD_FEATURES or settings.USE_ML_GATE:
+        recorder = FeatureRecorder(settings.SYMBOLS)
+    runners = [LiveTrendRunner(symbol, recorder) for symbol in settings.SYMBOLS]
 
     log.info("Preloading up to %d closed %s bars for %d symbols",
              PRELOAD_BARS, INTERVAL, len(runners))
@@ -221,6 +232,19 @@ async def main() -> None:
     log.info("Preload finished; starting closed-candle WebSocket streams")
 
     tasks = [asyncio.create_task(runner.run()) for runner in runners]
+    if recorder is not None:
+        async def _run_recorder():
+            # A recorder failure must never take the paper trader down; with the ML gate on,
+            # missing features simply make the gate stand aside (ML_ON_MISSING_FEATURES).
+            try:
+                await recorder.run()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("feature recorder crashed; ML gate will lack features")
+        tasks.append(asyncio.create_task(_run_recorder()))
+        log.info("Order-flow feature recorder started (ML gate %s)",
+                 "ON" if settings.USE_ML_GATE else "OFF (recording only)")
     try:
         await asyncio.gather(*tasks)
     finally:
