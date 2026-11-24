@@ -1,236 +1,350 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Paper Trading Dashboard</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        body { background-color: #0b0d11; color: #e2e8f0; font-family: 'Inter', sans-serif; }
-        .panel { background-color: #15181e; border: 1px solid #232732; }
-        .accent { color: #a855f7; }
-        .accent-bg { background-color: #a855f7; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PaperFlow – Paper Trading Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+/* ---------- tokens: milk + glass ---------- */
+:root{
+  --milk:#f6f7f9;            /* page base */
+  --milk-2:#eef0f4;
+  --ink:#1b2330;             /* primary text */
+  --ink-2:#5b6576;           /* secondary text */
+  --ink-3:#8c95a6;           /* tertiary text */
+  --up:#0d9b6a;  --up-bg:rgba(13,155,106,.12);
+  --down:#d9435a; --down-bg:rgba(217,67,90,.12);
+  --warn:#b7791f; --warn-bg:rgba(183,121,31,.14);
+  --accent:#4a63f5;          /* chart + active nav */
+  --glass:rgba(255,255,255,.58);
+  --glass-strong:rgba(255,255,255,.78);
+  --glass-edge:rgba(255,255,255,.9);
+  --glass-shadow:0 1px 0 rgba(255,255,255,.95) inset, 0 -1px 0 rgba(27,35,48,.04) inset,
+                 0 18px 40px -18px rgba(40,55,90,.22), 0 2px 6px rgba(40,55,90,.05);
+  --r-lg:26px; --r-md:18px; --r-sm:12px;
+  --font-ui:'DM Sans',system-ui,sans-serif;
+  --font-num:'Outfit','DM Sans',system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{
+  font-family:var(--font-ui);color:var(--ink);background:var(--milk);
+  font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased;
+  overflow:hidden;
+}
+/* soft colour pools behind the glass so the blur has something to refract */
+body::before{
+  content:"";position:fixed;inset:-10%;z-index:-1;pointer-events:none;
+  background:
+    radial-gradient(38% 42% at 12% 18%, rgba(160,196,255,.55), transparent 70%),
+    radial-gradient(34% 40% at 88% 12%, rgba(206,190,255,.50), transparent 70%),
+    radial-gradient(40% 46% at 78% 92%, rgba(170,232,210,.50), transparent 70%),
+    radial-gradient(30% 36% at 20% 86%, rgba(255,214,196,.42), transparent 70%),
+    linear-gradient(180deg,#f8f9fb,#eef0f5);
+}
+.num{font-family:var(--font-num);font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.t-up{color:var(--up)} .t-down{color:var(--down)} .muted{color:var(--ink-2)} .faint{color:var(--ink-3)}
+
+/* ---------- glass ---------- */
+.glass{
+  background:var(--glass);
+  -webkit-backdrop-filter:blur(26px) saturate(170%);
+  backdrop-filter:blur(26px) saturate(170%);
+  border:1px solid var(--glass-edge);
+  border-radius:var(--r-lg);
+  box-shadow:var(--glass-shadow);
+}
+.glass-sm{border-radius:var(--r-md)}
+.panel{padding:22px 24px}
+.panel h3{font-family:var(--font-num);font-weight:600;font-size:16px}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+.sub{font-size:12px;color:var(--ink-3)}
+
+/* ---------- shell ---------- */
+.app{display:grid;grid-template-columns:232px 1fr;gap:18px;height:100vh;padding:18px}
+.side{display:flex;flex-direction:column;padding:22px 16px}
+.brand{display:flex;align-items:center;gap:10px;padding:2px 10px 22px}
+.brand-mark{width:34px;height:34px;border-radius:11px;display:grid;place-items:center;
+  font-family:var(--font-num);font-weight:700;color:#fff;
+  background:linear-gradient(135deg,#6f86ff,#4a63f5);box-shadow:0 6px 14px -4px rgba(74,99,245,.5)}
+.brand b{font-family:var(--font-num);font-size:19px;font-weight:600}
+.nav{display:flex;flex-direction:column;gap:4px}
+.nav a{display:flex;align-items:center;gap:10px;padding:11px 12px;border-radius:var(--r-sm);
+  color:var(--ink-2);text-decoration:none;font-weight:500;transition:background .15s,color .15s}
+.nav a:hover{background:rgba(255,255,255,.6);color:var(--ink)}
+.nav a.on{background:var(--glass-strong);color:var(--ink);box-shadow:0 1px 0 #fff inset,0 6px 14px -8px rgba(40,55,90,.3)}
+.nav a:focus-visible,.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.nav svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.side-foot{margin-top:auto;padding:14px;border-radius:var(--r-md);background:rgba(255,255,255,.5);border:1px solid var(--glass-edge)}
+.side-foot b{display:block;font-family:var(--font-num);font-weight:600;margin-bottom:2px}
+
+.main{display:flex;flex-direction:column;gap:18px;min-width:0;overflow-y:auto;padding:2px 6px 10px 2px;scrollbar-width:thin}
+.top{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.top h1{font-family:var(--font-num);font-size:26px;font-weight:600;letter-spacing:-.02em}
+.top p{color:var(--ink-2);font-size:13px}
+.chips{display:flex;gap:10px;flex-wrap:wrap}
+.chip{display:flex;align-items:center;gap:10px;padding:9px 16px;border-radius:999px}
+.chip small{display:block;font-size:11px;color:var(--ink-3);line-height:1.1}
+.chip .num{font-size:15px;font-weight:600;line-height:1.2}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--ink-3);box-shadow:0 0 0 4px rgba(140,149,166,.18)}
+.dot[data-tone=ok]{background:var(--up);box-shadow:0 0 0 4px var(--up-bg)}
+.dot[data-tone=warn]{background:var(--warn);box-shadow:0 0 0 4px var(--warn-bg)}
+
+/* ---------- stats ---------- */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:18px}
+.stat{padding:20px 22px}
+.stat .label{font-size:13px;color:var(--ink-2)}
+.stat .value{font-size:32px;font-weight:600;margin-top:6px;line-height:1.1}
+.stat .note{font-size:12px;color:var(--ink-3);margin-top:6px}
+.tag{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600}
+.tag.up{background:var(--up-bg);color:var(--up)} .tag.down{background:var(--down-bg);color:var(--down)}
+
+/* ---------- grid ---------- */
+.grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:18px}
+.chart-box{position:relative;height:290px}
+.ring-wrap{display:flex;align-items:center;gap:22px}
+.ring{width:118px;height:118px;flex:none;position:relative}
+.ring svg{width:100%;height:100%;transform:rotate(-90deg)}
+.ring .track{stroke:rgba(27,35,48,.08)} .ring .bar{stroke:var(--accent);transition:stroke-dashoffset .6s ease}
+.ring .mid{position:absolute;inset:0;display:grid;place-items:center;text-align:center;font-size:22px;font-weight:600}
+
+.pos-list{display:flex;flex-direction:column;gap:10px;max-height:236px;overflow:auto}
+.pos{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;
+  background:rgba(255,255,255,.62);border:1px solid var(--glass-edge);border-radius:var(--r-sm)}
+.pos b{font-family:var(--font-num);font-weight:600;display:block}
+.pos .side-tag{font-size:12px;font-weight:600}
+.empty{padding:30px 0;text-align:center;color:var(--ink-3)}
+
+table{width:100%;border-collapse:collapse}
+th{font-weight:500;font-size:12px;color:var(--ink-3);text-align:left;padding:8px 12px;border-bottom:1px solid rgba(27,35,48,.08)}
+td{padding:12px;border-bottom:1px solid rgba(27,35,48,.06);color:var(--ink-2)}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover td{background:rgba(255,255,255,.5)}
+td.sym{color:var(--ink);font-weight:600;font-family:var(--font-num)}
+.wide{grid-column:1 / -1}
+.gate-line{font-size:12.5px;margin-top:2px}
+.gate-line[data-tone=ok]{color:var(--up)} .gate-line[data-tone=warn]{color:var(--warn)} .gate-line[data-tone=mute]{color:var(--ink-3)}
+
+/* ---------- responsive ---------- */
+@media (max-width:1100px){.stats{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}}
+@media (max-width:760px){
+  body{overflow:auto}
+  .app{grid-template-columns:1fr;height:auto;padding:12px}
+  .side{flex-direction:row;align-items:center;padding:10px 12px;gap:12px}
+  .brand{padding:0}.nav{flex-direction:row;margin-left:auto}.nav a span{display:none}.side-foot{display:none}
+  .main{overflow:visible}
+  .stats{grid-template-columns:1fr 1fr;gap:12px}.stat .value{font-size:24px}
+  .chart-box{height:230px}
+  .ring-wrap{flex-direction:column;align-items:flex-start}
+  th:nth-child(1),td:nth-child(1){display:none}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  .glass{background:rgba(255,255,255,.88)}
+}
+</style>
 </head>
-<body class="h-screen flex overflow-hidden">
+<body>
+<div class="app">
 
-    <!-- Sidebar -->
-    <aside class="w-64 border-r border-[#232732] flex flex-col bg-[#0b0d11]">
-        <div class="p-6 flex items-center gap-3">
-            <div class="w-8 h-8 rounded-full bg-gradient-to-tr from-purple-500 to-indigo-500 flex items-center justify-center font-bold text-white">P</div>
-            <span class="text-xl font-bold text-white">PaperFlow</span>
+  <!-- Sidebar -->
+  <aside class="glass side">
+    <div class="brand"><div class="brand-mark">P</div><b>PaperFlow</b></div>
+    <nav class="nav" aria-label="Sections">
+      <a href="#overview" class="on"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="2"/><rect x="14" y="3" width="7" height="5" rx="2"/><rect x="14" y="12" width="7" height="9" rx="2"/><rect x="3" y="16" width="7" height="5" rx="2"/></svg><span>Dashboard</span></a>
+      <a href="#positions"><svg viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-9"/><path d="M15 7h5v5"/></svg><span>Positions</span></a>
+      <a href="#signals"><svg viewBox="0 0 24 24"><path d="M4 12h3l2-6 4 12 2-6h5"/></svg><span>Signals</span></a>
+    </nav>
+    <div class="side-foot"><b>Paper trading</b><span class="sub">Simulated orders only. No real funds.</span></div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <header class="top" id="overview">
+      <div>
+        <h1>Overview</h1>
+        <p>Live paper trading across your configured symbols.</p>
+      </div>
+      <div class="chips">
+        <div class="glass chip" title="/health">
+          <span class="dot" id="health-dot"></span>
+          <div>
+            <small>System / ML gate</small>
+            <div class="num" id="health-badge" style="font-size:13px">…</div>
+            <div class="gate-line" id="gate-line" data-tone="mute"></div>
+          </div>
         </div>
-        <nav class="flex-1 px-4 space-y-2 mt-4">
-            <a href="#" class="flex items-center gap-3 px-4 py-3 bg-[#1e2230] rounded-xl text-white font-medium border border-[#2d3345]">
-                <span class="text-purple-400">◈</span> Dashboard
-            </a>
-            <a href="#" class="flex items-center gap-3 px-4 py-3 text-gray-400 hover:text-white transition">Portfolio</a>
-            <a href="#" class="flex items-center gap-3 px-4 py-3 text-gray-400 hover:text-white transition">Logs</a>
-            <a href="#" class="flex items-center gap-3 px-4 py-3 text-gray-400 hover:text-white transition">Settings</a>
-        </nav>
-        <div class="p-6 text-xs text-gray-500">Paper Trading Mode</div>
-    </aside>
-
-    <!-- Main Content -->
-    <main class="flex-1 overflow-y-auto p-8">
-        <header class="flex justify-between items-center mb-8">
-            <div>
-                <h1 class="text-2xl font-semibold text-white">Welcome back, Trader</h1>
-                <p class="text-gray-400 text-sm">Your live paper trading overview.</p>
-            </div>
-            <div class="flex items-center gap-4">
-                <div class="text-right" title="/health">
-                    <p class="text-xs text-gray-500">System / ML gate</p>
-                    <p id="health-badge" class="text-sm font-semibold text-gray-400">…</p>
-                    <p id="gate-line" class="text-xs text-gray-400"></p>
-                </div>
-                <div class="text-right">
-                    <p class="text-xs text-gray-500">Total Equity</p>
-                    <p id="total-equity" class="text-xl font-bold text-green-400">$40,000.00</p>
-                </div>
-            </div>
-        </header>
-
-        <!-- Top Cards -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-            <div class="panel p-6 rounded-2xl">
-                <p class="text-sm text-gray-400">Total P&L</p>
-                <h2 id="total-pnl" class="text-3xl font-bold text-white mt-2">$0.00</h2>
-                <p class="text-xs text-gray-500 mt-1">All time</p>
-            </div>
-            <div class="panel p-6 rounded-2xl">
-                <p class="text-sm text-gray-400">Win Rate</p>
-                <h2 id="win-rate" class="text-3xl font-bold text-white mt-2">0%</h2>
-                <p class="text-xs text-gray-500 mt-1">Across all closed trades</p>
-            </div>
-            <div class="panel p-6 rounded-2xl">
-                <p class="text-sm text-gray-400">Active Signals</p>
-                <h2 id="active-signals" class="text-3xl font-bold text-purple-400 mt-2">0</h2>
-                <p class="text-xs text-gray-500 mt-1">Open positions</p>
-            </div>
+        <div class="glass chip">
+          <div><small>Total equity</small><div class="num" id="total-equity">$40,000.00</div></div>
         </div>
+      </div>
+    </header>
 
-        <!-- Chart & Tables -->
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <!-- Equity Curve -->
-            <div class="panel p-6 rounded-2xl lg:col-span-2">
-                <h3 class="text-lg font-medium text-white mb-4">Portfolio Performance</h3>
-                <div class="h-64">
-                    <canvas id="equityChart"></canvas>
-                </div>
-            </div>
+    <section class="stats" aria-label="Summary">
+      <div class="glass stat">
+        <div class="label">Total P&amp;L</div>
+        <div class="value num" id="total-pnl">$0.00</div>
+        <div class="note"><span class="tag up" id="pnl-pct">0.00%</span> since start</div>
+      </div>
+      <div class="glass stat">
+        <div class="label">Win rate</div>
+        <div class="value num" id="win-rate">0%</div>
+        <div class="note">Across all closed trades</div>
+      </div>
+      <div class="glass stat">
+        <div class="label">Closed trades</div>
+        <div class="value num" id="trade-count">0</div>
+        <div class="note">Since the paper account started</div>
+      </div>
+      <div class="glass stat">
+        <div class="label">Open positions</div>
+        <div class="value num" id="active-signals">0</div>
+        <div class="note">Currently held</div>
+      </div>
+    </section>
 
-            <!-- Open Positions -->
-            <div class="panel p-6 rounded-2xl">
-                <h3 class="text-lg font-medium text-white mb-4">Open Positions</h3>
-                <div id="positions-list" class="space-y-3 text-sm">
-                    <p class="text-gray-500 text-center py-8">No open positions</p>
-                </div>
+    <section class="grid">
+      <div class="glass panel">
+        <div class="panel-head"><h3>Portfolio performance</h3><span class="sub">Equity after each closed trade</span></div>
+        <div class="chart-box"><canvas id="equityChart" aria-label="Equity curve"></canvas></div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:18px;min-width:0">
+        <div class="glass panel">
+          <div class="panel-head"><h3>Win rate</h3></div>
+          <div class="ring-wrap">
+            <div class="ring">
+              <svg viewBox="0 0 120 120"><circle class="track" cx="60" cy="60" r="50" fill="none" stroke-width="12"/>
+                <circle class="bar" id="ring-bar" cx="60" cy="60" r="50" fill="none" stroke-width="12" stroke-linecap="round" stroke-dasharray="314.16" stroke-dashoffset="314.16"/></svg>
+              <div class="mid num" id="ring-val">0%</div>
             </div>
-            
-            <!-- Recent Signals -->
-            <div class="panel p-6 rounded-2xl lg:col-span-3">
-                <h3 class="text-lg font-medium text-white mb-4">Recent Signals (London)</h3>
-                <table class="w-full text-left text-sm text-gray-400">
-                    <thead class="text-xs uppercase bg-[#1e2230] text-gray-500">
-                        <tr>
-                            <th class="px-4 py-3 rounded-l-lg">Time</th>
-                            <th class="px-4 py-3">Symbol</th>
-                            <th class="px-4 py-3">Direction</th>
-                            <th class="px-4 py-3 rounded-r-lg">Price</th>
-                        </tr>
-                    </thead>
-                    <tbody id="signals-table">
-                        <tr><td colspan="4" class="text-center py-4">Waiting for signals...</td></tr>
-                    </tbody>
-                </table>
-            </div>
+            <p class="sub">Share of closed trades that finished in profit.</p>
+          </div>
         </div>
-    </main>
+        <div class="glass panel" id="positions">
+          <div class="panel-head"><h3>Open positions</h3></div>
+          <div id="positions-list" class="pos-list"><p class="empty">No open positions</p></div>
+        </div>
+      </div>
 
-    <script>
-        // Initialize Chart
-        const ctx = document.getElementById('equityChart').getContext('2d');
-        let chart = new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: [],
-                datasets: [{
-                    label: 'Equity',
-                    data: [],
-                    borderColor: '#a855f7',
-                    backgroundColor: 'rgba(168, 85, 247, 0.1)',
-                    borderWidth: 2,
-                    fill: true,
-                    tension: 0.4,
-                    pointRadius: 0
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: { legend: { display: false } },
-                scales: {
-                    x: { display: false },
-                    y: { 
-                        grid: { color: '#232732' },
-                        ticks: { color: '#64748b' }
-                    }
-                }
-            }
-        });
+      <div class="glass panel wide" id="signals">
+        <div class="panel-head"><h3>Recent signals</h3><span class="sub">London session, newest first</span></div>
+        <table>
+          <thead><tr><th>Time</th><th>Symbol</th><th>Direction</th><th>Price</th></tr></thead>
+          <tbody id="signals-table"><tr><td colspan="4" class="empty">Waiting for signals…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
 
-        async function fetchHealth() {
-            try {
-                const h = await (await fetch('/health')).json();
-                const age = h.recorder ? Math.round(h.recorder.last_feature_age_s ?? -1) : null;
-                const model = h.model.present ? `model ${h.model.champion_version}` : 'rules';
-                const el = document.getElementById('health-badge');
-                el.innerText = `${h.status.toUpperCase()} · ${h.ml_gate_enabled ? 'ML' : 'RULES'} (${model})` +
-                    (age !== null ? ` · feat ${age}s` : '');
-                el.className = 'text-sm font-semibold ' + (h.status === 'ok' ? 'text-green-400' : 'text-yellow-400');
-                const g = document.getElementById('gate-line');
-                g.innerText = h.gate_state.line + (h.monitor && h.monitor.any_flag ? ' · DRIFT: ' + h.monitor.flags.join(', ') : '');
-                g.className = 'text-xs ' + ({active: 'text-green-400', rules: 'text-gray-400'}[h.gate_state.state] || 'text-yellow-400');
-            } catch (e) { /* health is best-effort */ }
-        }
+<script>
+const $ = id => document.getElementById(id);
+const money = v => '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-        async function fetchData() {
-            fetchHealth();
-            try {
-                const res = await fetch('/api/dashboard');
-                const data = await res.json();
+// ---- equity chart ----
+const ctx = $('equityChart').getContext('2d');
+const chart = new Chart(ctx, {
+  type: 'line',
+  data: {labels: [], datasets: [{label: 'Equity', data: [], borderColor: '#4a63f5', borderWidth: 2.5,
+    backgroundColor: 'rgba(74,99,245,.12)', fill: true, tension: .38, pointRadius: 0, pointHoverRadius: 5,
+    pointHoverBackgroundColor: '#fff', pointHoverBorderColor: '#4a63f5', pointHoverBorderWidth: 2}]},
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    interaction: {mode: 'index', intersect: false},
+    plugins: {legend: {display: false},
+      tooltip: {backgroundColor: 'rgba(255,255,255,.92)', titleColor: '#1b2330', bodyColor: '#1b2330',
+        borderColor: 'rgba(27,35,48,.08)', borderWidth: 1, padding: 10, displayColors: false,
+        callbacks: {label: c => money(c.parsed.y)}}},
+    scales: {
+      x: {display: false},
+      y: {grid: {color: 'rgba(27,35,48,.07)', drawBorder: false}, border: {display: false},
+          ticks: {color: '#8c95a6', callback: v => '$' + Number(v).toLocaleString()}}
+    }
+  }
+});
 
-                // Update Summary
-                document.getElementById('total-equity').innerText = `$${data.summary.total_equity.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
-                
-                const pnlEl = document.getElementById('total-pnl');
-                pnlEl.innerText = `$${data.summary.total_pnl.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
-                pnlEl.className = `text-3xl font-bold mt-2 ${data.summary.total_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`;
+// ---- health / gate ----
+async function fetchHealth() {
+  try {
+    const h = await (await fetch('/health')).json();
+    const age = h.recorder ? Math.round(h.recorder.last_feature_age_s ?? -1) : null;
+    const model = h.model.present ? `model ${h.model.champion_version}` : 'rules';
+    const ok = h.status === 'ok';
+    $('health-badge').textContent = `${h.status.toUpperCase()} · ${h.ml_gate_enabled ? 'ML' : 'RULES'} (${model})` +
+      (age !== null ? ` · feat ${age}s` : '');
+    $('health-dot').dataset.tone = ok ? 'ok' : 'warn';
+    const g = $('gate-line');
+    g.textContent = h.gate_state.line + (h.monitor && h.monitor.any_flag ? ' · DRIFT: ' + h.monitor.flags.join(', ') : '');
+    g.dataset.tone = ({active: 'ok', rules: 'mute'}[h.gate_state.state]) || 'warn';
+  } catch (e) { /* health is best-effort */ }
+}
 
-                document.getElementById('win-rate').innerText = `${data.summary.win_rate.toFixed(1)}%`;
-                document.getElementById('active-signals').innerText = data.positions.length;
+// ---- main data ----
+async function fetchData() {
+  fetchHealth();
+  try {
+    const data = await (await fetch('/api/dashboard')).json();
+    const s = data.summary;
 
-                // Update Positions
-                const posList = document.getElementById('positions-list');
-                if (data.positions.length === 0) {
-                    posList.innerHTML = '<p class="text-gray-500 text-center py-8">No open positions</p>';
-                } else {
-                    posList.innerHTML = data.positions.map(p => `
-                        <div class="flex justify-between items-center p-3 bg-[#1e2230] rounded-lg border border-[#2d3345]">
-                            <div>
-                                <p class="font-bold text-white">${p.symbol}</p>
-                                <p class="text-xs ${p.side === 'LONG' ? 'text-green-400' : 'text-red-400'}">${p.side}</p>
-                            </div>
-                            <div class="text-right">
-                                <p class="text-white">$${p.entry.toFixed(2)}</p>
-                                <p class="text-xs text-gray-500">Stop: ${p.stop ? p.stop.toFixed(2) : 'TRAIL'}</p>
-                            </div>
-                        </div>
-                    `).join('');
-                }
+    $('total-equity').textContent = money(s.total_equity);
 
-                // Update Signals Table
-                const sigTable = document.getElementById('signals-table');
-                if (data.signals.length === 0) {
-                    sigTable.innerHTML = '<tr><td colspan="4" class="text-center py-4">Waiting for signals...</td></tr>';
-                } else {
-                    sigTable.innerHTML = data.signals.map(s => {
-                        const date = new Date(s.ts).toLocaleString();
-                        const color = s.direction === 'LONG' ? 'text-green-400' : 'text-red-400';
-                        return `
-                            <tr class="border-b border-[#232732] hover:bg-[#1e2230]">
-                                <td class="px-4 py-3">${date}</td>
-                                <td class="px-4 py-3 font-medium text-white">${s.symbol}</td>
-                                <td class="px-4 py-3 ${color}">${s.direction}</td>
-                                <td class="px-4 py-3">$${s.close.toFixed(2)}</td>
-                            </tr>
-                        `;
-                    }).join('');
-                }
+    const pnl = $('total-pnl');
+    pnl.textContent = money(s.total_pnl);
+    pnl.className = 'value num ' + (s.total_pnl >= 0 ? 't-up' : 't-down');
+    const pct = s.initial_equity ? s.total_pnl / s.initial_equity * 100 : 0;
+    const pt = $('pnl-pct');
+    pt.textContent = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+    pt.className = 'tag ' + (pct >= 0 ? 'up' : 'down');
 
-                // Update Chart
-                const labels = data.equity_curve.map(p => new Date(p.ts).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}));
-                const values = data.equity_curve.map(p => p.equity);
-                chart.data.labels = labels;
-                chart.data.datasets[0].data = values;
-                
-                // Add gradient effect
-                const gradient = ctx.createLinearGradient(0, 0, 0, 300);
-                gradient.addColorStop(0, 'rgba(168, 85, 247, 0.3)');
-                gradient.addColorStop(1, 'rgba(168, 85, 247, 0)');
-                chart.data.datasets[0].backgroundColor = gradient;
-                chart.update();
+    $('win-rate').textContent = s.win_rate.toFixed(1) + '%';
+    $('trade-count').textContent = s.total_trades ?? 0;
+    $('active-signals').textContent = data.positions.length;
 
-            } catch (e) {
-                console.error("Dashboard fetch failed:", e);
-            }
-        }
+    $('ring-val').textContent = Math.round(s.win_rate) + '%';
+    $('ring-bar').style.strokeDashoffset = 314.16 * (1 - Math.min(Math.max(s.win_rate, 0), 100) / 100);
 
-        // Fetch immediately and then every 5 seconds
-        fetchData();
-        setInterval(fetchData, 5000);
-    </script>
+    // positions
+    const posList = $('positions-list');
+    posList.innerHTML = data.positions.length === 0
+      ? '<p class="empty">No open positions</p>'
+      : data.positions.map(p => `
+        <div class="pos">
+          <div><b>${esc(p.symbol)}</b><span class="side-tag ${p.side === 'LONG' ? 't-up' : 't-down'}">${esc(p.side)}</span></div>
+          <div style="text-align:right"><b>${money(p.entry)}</b>
+            <span class="sub">Stop ${p.stop ? Number(p.stop).toFixed(2) : 'trailing'}</span></div>
+        </div>`).join('');
+
+    // signals
+    $('signals-table').innerHTML = data.signals.length === 0
+      ? '<tr><td colspan="4" class="empty">Waiting for signals…</td></tr>'
+      : data.signals.map(x => `
+        <tr>
+          <td>${new Date(x.ts).toLocaleString()}</td>
+          <td class="sym">${esc(x.symbol)}</td>
+          <td class="${x.direction === 'LONG' ? 't-up' : 't-down'}"><b>${esc(x.direction)}</b></td>
+          <td class="num">${money(x.close)}</td>
+        </tr>`).join('');
+
+    // chart
+    chart.data.labels = data.equity_curve.map(p => new Date(p.ts).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}));
+    chart.data.datasets[0].data = data.equity_curve.map(p => p.equity);
+    const grad = ctx.createLinearGradient(0, 0, 0, 290);
+    grad.addColorStop(0, 'rgba(74,99,245,.28)');
+    grad.addColorStop(1, 'rgba(74,99,245,0)');
+    chart.data.datasets[0].backgroundColor = grad;
+    chart.update('none');
+  } catch (e) {
+    console.error('Dashboard fetch failed:', e);
+  }
+}
+
+fetchData();
+setInterval(fetchData, 5000);
+</script>
 </body>
 </html>

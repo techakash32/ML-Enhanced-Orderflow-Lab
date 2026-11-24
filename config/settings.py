@@ -293,6 +293,11 @@ MIN_HOLDOUT_TRADES = int(os.environ.get("MIN_HOLDOUT_TRADES", "30"))
 ML_ALLOW_EXIT_MISMATCH = _env_bool("ML_ALLOW_EXIT_MISMATCH", "false")
 
 # Order-flow feature recorder (needed for live ML inference and for training data)
+# Display-only candle feed monitor (prints every closed candle; never affects trading)
+SHOW_CANDLES = _env_bool("SHOW_CANDLES", "false")
+SHOW_CANDLE_INTERVALS = [x.strip() for x in os.environ.get("SHOW_CANDLE_INTERVALS", "1m").split(",") if x.strip()]
+CANDLE_LOG_PATH = os.environ.get("CANDLE_LOG_PATH", "logs/candles.jsonl")   # "" disables saving
+
 RECORD_FEATURES = _env_bool("RECORD_FEATURES", "true" if USE_ML_GATE else "false")
 FEATURE_STORE_PATH = os.environ.get("FEATURE_STORE_PATH", "logs/feature_store")
 # Symbols to RECORD (training data). May be wider than the traded SYMBOLS: the model is pooled
@@ -322,3 +327,5 @@ WS_MARKET_BASE = os.environ.get("WS_MARKET_BASE", "wss://fstream.binance.com/mar
 if os.environ.get("FEE_OVERRIDE", "false").lower() == "true":
     PAPER_FEE_TAKER_PCT = float(os.environ.get("FEE_TAKER", str(PAPER_FEE_TAKER_PCT)))
     PAPER_FEE_MAKER_PCT = float(os.environ.get("FEE_MAKER", str(PAPER_FEE_MAKER_PCT)))
+
+    

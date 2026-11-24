@@ -20,7 +20,8 @@ app.add_middleware(
 STATE_DIR = "logs/paper_live"
 TRADES_LOG = "logs/paper/trades.jsonl"
 SIGNALS_LOG = f"{STATE_DIR}/signals.jsonl"
-STARTING_EQUITY_PER_SYMBOL = 10000.0
+# Must match scripts/paper_live.py: PAPER_START_EQUITY is split evenly across the symbols.
+STARTING_EQUITY_PER_SYMBOL = settings.PAPER_START_EQUITY / len(settings.SYMBOLS)
 
 def get_latest_data():
     total_equity = 0.0

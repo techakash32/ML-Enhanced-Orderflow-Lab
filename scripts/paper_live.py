@@ -272,6 +272,19 @@ async def main() -> None:
         tasks.append(asyncio.create_task(_run_recorder()))
         log.info("Order-flow feature recorder started (ML gate %s)",
                  "ON" if settings.USE_ML_GATE else "OFF (recording only)")
+    from data.candle_monitor import from_settings as candle_monitor
+    monitor = candle_monitor()
+    if monitor is not None:
+        async def _run_monitor():
+            try:
+                await monitor.run()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("candle monitor crashed (trading unaffected)")
+        tasks.append(asyncio.create_task(_run_monitor()))
+        log.info("Candle monitor ON: showing closed %s candles (SHOW_CANDLES=true)",
+                 ",".join(settings.SHOW_CANDLE_INTERVALS))
     try:
         await asyncio.gather(*tasks)
     finally:
@@ -291,3 +304,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nStopped.")
+
+        

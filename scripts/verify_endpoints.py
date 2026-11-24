@@ -4,9 +4,16 @@ Verify the Binance USD-M futures websocket endpoints the recorder depends on.
     python scripts/verify_endpoints.py            # 30 s per endpoint, >= 5 messages each
     python scripts/verify_endpoints.py --seconds 15 --min-msgs 3
 
-Checks the EXACT URLs the recorder builds (settings.WS_*), plus alternatives (depth20, the
-raw @trade stream, and the legacy single combined /stream socket) so you can see which layout
-works from your network. Needs internet; read-only market data, no keys.
+Checks the EXACT URLs the recorder builds (settings.WS_*), plus an alternative (depth20) so
+you can see which layout works from your network. Needs internet; read-only market data, no
+keys.
+
+Note: a single combined socket carrying BOTH @aggTrade and @depth is intentionally NOT
+probed. Since the USD-M futures split, @depth/@bookTicker are served from /public while
+@aggTrade/@markPrice are served from /market; Binance serves these on separate endpoints
+and a single socket cannot carry both. The recorder therefore runs in split mode (two
+connections), which is the only correct layout.
+
 Exit code 0 only if every endpoint the recorder REQUIRES works. Re-run if Binance changes
 its futures websocket split (/public, /market, /private).
 """
@@ -26,16 +33,13 @@ SYM = "btcusdt"
 
 
 def checks():
-    M, P, C = settings.WS_MARKET_BASE, settings.WS_PUBLIC_BASE, settings.WS_COMBINED_BASE
+    M, P = settings.WS_MARKET_BASE, settings.WS_PUBLIC_BASE
     d = settings.FEATURE_DEPTH_LEVELS
     return [
         # (label, url, expected event names, required-by-recorder-in-split-mode)
         ("market  aggTrade (recorder)", f"{M}{SYM}@aggTrade", {"aggTrade"}, True),
         ("public  depth%d@100ms (recorder)" % d, f"{P}{SYM}@depth{d}@100ms", {"depthUpdate"}, True),
         ("public  depth20@100ms", f"{P}{SYM}@depth20@100ms", {"depthUpdate"}, False),
-        ("market  trade (raw)", f"{M}{SYM}@trade", {"trade"}, False),
-        ("legacy combined aggTrade+depth (single socket)",
-         f"{C}{SYM}@aggTrade/{SYM}@depth{d}@100ms", {"aggTrade", "depthUpdate"}, False),
     ]
 
 
@@ -84,13 +88,10 @@ async def main(seconds: float, min_msgs: int) -> int:
     print("\n=== SUMMARY ===")
     print("Working :", [u for _, u, ok, *_ in rows if ok] or "none")
     print("Failing :", [u for _, u, ok, *_ in rows if not ok] or "none")
-    comb = [r for r in rows if r[0].startswith("legacy")][0]
-    if comb[2]:
-        print("Note: the legacy combined socket works - you may set WS_RECORDER_MODE=combined (one connection).")
     if not required_ok:
         print("\nREQUIRED endpoint(s) failed. Check https://developers.binance.com/docs/derivatives/usds-margined-futures/"
               "websocket-market-streams for the current /public /market /private split and set "
-              "WS_MARKET_BASE / WS_PUBLIC_BASE / WS_COMBINED_BASE accordingly.")
+              "WS_MARKET_BASE / WS_PUBLIC_BASE accordingly.")
     return 0 if required_ok else 1
 
 
@@ -100,3 +101,4 @@ if __name__ == "__main__":
     ap.add_argument("--min-msgs", type=int, default=5)
     a = ap.parse_args()
     raise SystemExit(asyncio.run(main(a.seconds, a.min_msgs)))
+
