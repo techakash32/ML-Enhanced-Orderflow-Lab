@@ -1,0 +1,185 @@
+CRYPTO ORDERFLOW EDGE LAB - STEPS, EXPLANATION, AND HOW MLFLOW IS USED
+=====================================================================
+Paper trading only. The project never places real orders and holds no exchange keys.
+
+
+PART 1 - WHAT HAPPENED IN THIS PROJECT
+--------------------------------------
+You had a Binance paper trader: it watches 4-hour candles for BTC, ETH, XRP and ADA,
+and decides LONG / SHORT using fixed rules (the "entry gate" in engine/decision.py).
+Orders are simulated by PaperTrader, and a FastAPI dashboard shows the results.
+
+What we added:
+
+ 1. Order-flow features (features/)
+    Every 60 seconds we compute, from Binance live trades + order book:
+      - OFI          order-flow imbalance (net buying vs selling pressure)
+      - VPIN         probability of informed trading
+      - microprice   book-weighted price vs mid price
+      - queue imbalance, trade-size statistics
+    They use only data from BEFORE the snapshot time, so there is no look-ahead.
+    They are saved as Parquet files in logs/feature_store/.
+
+ 2. Labels (ml/labeling.py, ml/exit_sim.py)
+    For each past moment we ask: "If the strategy had entered here, with the SAME
+    exit rules as the live PaperTrader (2xATR stop, trailing stop, 90-bar time stop,
+    fees, slippage), would the trade have won, lost or been breakeven?"
+    This is a triple-barrier style label. tests/test_exit_parity.py proves the label
+    simulator matches the real PaperTrader.
+
+ 3. Training (ml/train.py)
+    A LightGBM classifier learns P(trade is favourable) from the features.
+    Validation is "purged walk-forward": train on the past, test on the future,
+    removing samples whose trades overlap the test period, plus a final time-based
+    holdout. The score is economic: win rate vs breakeven win rate, expectancy in R.
+
+ 4. MLflow (ml/registry.py) - see Part 3.
+
+ 5. Champion / challenger promotion
+    A new model (challenger) replaces the live model (champion) only if it has at
+    least 30 holdout trades and is not worse than the champion.
+
+ 6. ML gate (ml/gate.py, engine/decision.py)
+    The old rules still propose a direction. Then the model must say
+    P > ML_GATE_THRESHOLD (0.55) before the trade is allowed.
+    USE_ML_GATE=false  ->  original rule-based gate, exactly as before.
+    No model / missing features -> automatic fallback or stand aside.
+
+ 7. Weekly retraining + drift monitor (ml/retrain.py, ml/monitor.py)
+    Retrains weekly, promotes only through the gate above, and watches for feature
+    drift, prediction drift and live win-rate drift.
+
+ 8. Deployment: Dockerfile, docker-compose.yml, render.yaml, start.sh, /health endpoint.
+
+ 9. UI + extras (latest session)
+    - Dashboard redesigned as milk-white glass (dashboard/index.html).
+    - Candle monitor: SHOW_CANDLES=true prints every closed 1m candle.
+    - Dashboard bug fixed: it showed -75% P&L because it assumed $10,000 per symbol,
+      but the $10,000 account is split into $2,500 per symbol.
+
+IMPORTANT STATUS: no real data has been collected yet. Results seen so far (about
++0.60R) came from SYNTHETIC data and only prove the plumbing works. A real model
+needs roughly 4 weeks of recorded data.
+
+
+PART 2 - COMMANDS (PowerShell, run from the repo root)
+------------------------------------------------------
+A) One-time setup
+     python -m venv .venv
+     .venv\Scripts\Activate.ps1
+     pip install -r requirements.txt
+
+B) Run the trader + record data (terminal 1)
+     $env:USE_ML_GATE = "false"
+     $env:RECORD_FEATURES = "true"      # records order-flow features for training
+     $env:SHOW_CANDLES = "true"         # optional: print closed 1m candles
+     python -m scripts.paper_live
+
+   Leave this running. The more hours it runs, the more training data you get.
+   (When finished: Remove-Item Env:SHOW_CANDLES; Remove-Item Env:RECORD_FEATURES;
+    Remove-Item Env:USE_ML_GATE)
+
+C) Dashboard (terminal 2)
+     uvicorn scripts.dashboard:app --host 127.0.0.1 --port 8000 --reload
+   Open http://localhost:8000     (health: http://localhost:8000/health)
+
+D) Check how much usable data you have (after a few days)
+     python -m ml.train --report-trade-rate
+
+E) Train (needs real recorded data; about 2+ weeks minimum, ~4 weeks recommended)
+     python -m ml.train --lookback-days 60
+
+   This writes the model to logs/ml/models/champion, logs the run to MLflow, and
+   promotes it only if it passes the gate.
+
+F) Open the MLflow UI (terminal 3)
+     mlflow ui --backend-store-uri sqlite:///logs/ml/mlruns/mlflow.db
+   Open http://localhost:5000  and click the experiment "orderflow_lgbm".
+
+G) Turn the ML gate on (only after a champion exists; /health shows model.present=true)
+     $env:USE_ML_GATE = "true"
+     python -m scripts.paper_live
+   Roll back any time with USE_ML_GATE=false.
+
+H) Practice run with FAKE data (to see the pipeline and MLflow work today)
+     python -m ml.synthetic --root logs/synth_store --days 6
+     python -m ml.train --store logs/synth_store --force-promote
+     mlflow ui --backend-store-uri sqlite:///logs/ml/mlruns/mlflow.db
+   Synthetic results are NOT real performance. Delete logs/ml afterwards before
+   training on real data, so the fake model is not left as champion:
+     Remove-Item -Recurse logs\ml , logs\synth_store
+
+COMMANDS FROM YOUR NOTES THAT NEED CORRECTING
+   python -m ml.labeling --input data/features/ --synthetic
+        -> there is no --synthetic flag and the store is not data/features.
+           Use:  python -m ml.labeling --input logs/feature_store
+           (add --out labels.parquet to save the labelled table)
+   python -m ml.train --data data/features/ --mlflow
+        -> default store is logs/feature_store, and MLflow logging is already on.
+           Use:  python -m ml.train --lookback-days 60
+   mlflow ui --backend-store-uri sqlite:///mlruns/mlflow.db
+        -> that database is empty. The project writes to
+           sqlite:///logs/ml/mlruns/mlflow.db  (see command F).
+   The page you saw earlier ("MLflow Demo", safety issues, traces) is MLflow's
+   built-in sample experiment. It is not your project. Ignore it.
+
+
+PART 3 - WHY MLFLOW, WHICH DATA, AND HOW IT WORKS
+-------------------------------------------------
+WHY
+   Training a trading model produces many versions. Without a tracker you cannot say
+   which model is live, what data or settings produced it, or whether a new model
+   is really better. MLflow gives us:
+     - a record of every training run (parameters, metrics, files),
+     - a model registry that stores each model version,
+     - a "champion" label that points at the model the trader should use.
+   It runs locally on a SQLite file. No server or cloud service is needed.
+
+WHICH DATA IT STORES (it never stores market data or trades)
+   Per training run:
+     parameters   learning rate, leaves, ATR multiples, hold bars, threshold, seed...
+     metrics      cross-validation and holdout results: win rate, breakeven win rate,
+                  edge, expectancy in R, number of trades, AUC / log-loss
+     artifacts    the model bundle (model.txt + manifest.json), feature importance,
+                  trade-count report, feature distribution used by the drift monitor
+     tags         data date range, git info, drift events from the past 7 days
+   Registry:
+     registered model "orderflow_lgbm" with numbered versions; alias "champion"
+     marks the live one.
+   Files:
+     logs/ml/mlruns/mlflow.db          run and registry database
+     logs/ml/mlruns/artifacts/         saved model files
+     logs/ml/models/champion/          local copy the trader loads
+
+HOW IT WORKS (one training cycle)
+   1. Order-flow snapshots, recorded live -> logs/feature_store (Parquet)
+   2. Labels built with the live exit rules (won / lost / breakeven)
+   3. LightGBM trained with purged walk-forward CV, evaluated on a held-out period
+   4. Run logged to MLflow; the model is registered as a new version
+   5. Promotion check:
+        - fewer than 30 holdout trades        -> NOT promoted ("needs_more_data")
+        - first model                          -> promoted only if holdout edge >= 0
+        - later models                         -> promoted only if within 0.01 of the
+                                                  current champion's holdout metric
+   6. If promoted, alias "champion" moves to the new version and the bundle is copied
+      to logs/ml/models/champion
+   7. The live ML gate checks that folder every 5 minutes and hot-loads the new model
+      with no restart. If the folder has no model, the trader quietly uses the rules.
+   8. The drift monitor compares live features and results to the champion's training
+      data and flags problems on /health and in MLflow.
+
+HOW TO READ THE MLFLOW UI
+   Experiments -> orderflow_lgbm -> pick a run -> Metrics (look at the holdout edge and
+   expectancy_r, and the trade count) -> Artifacts (the bundle).
+   Models -> orderflow_lgbm -> the version tagged "champion" is the live model.
+
+
+PART 4 - WHAT TO DO NEXT
+------------------------
+ 1. Run commands B and C on your PC and leave them running (or deploy with Docker/Render;
+    see docs/RUNBOOK.md).
+ 2. Around day 14 run command D and decide whether to relax any strategy rule
+    (docs/PARITY_REPORT.md, section 4).
+ 3. After about 4 weeks run command E, check the metrics in MLflow (F).
+ 4. Only if a champion is promoted, switch on the ML gate (G).
+ 5. Keep USE_ML_GATE=false until then. Nothing here is verified on real data yet.

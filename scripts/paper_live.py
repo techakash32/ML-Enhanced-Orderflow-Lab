@@ -102,7 +102,7 @@ class LiveTrendRunner:
             persist=True,
             state_path=os.path.join(LOG_DIR, f"state_{symbol}.json"),
             symbol=symbol,
-            initial_equity=settings.PAPER_START_EQUITY / len(settings.SYMBOLS),
+            initial_equity=settings.PAPER_EQUITY_PER_SYMBOL,
         )
         self.stats = {"bars": 0, "duplicates": 0, "signals": 0, "warmup": 0}
 
@@ -235,6 +235,9 @@ async def main() -> None:
     if settings.RECORD_FEATURES or settings.USE_ML_GATE:
         recorder = FeatureRecorder(sorted(set(settings.FEATURE_SYMBOLS) | set(settings.SYMBOLS)))
     runners = [LiveTrendRunner(symbol, recorder) for symbol in settings.SYMBOLS]
+    log.info("Paper accounts: %.2f per symbol x %d = %.2f total",
+             settings.PAPER_EQUITY_PER_SYMBOL, len(runners),
+             settings.PAPER_EQUITY_PER_SYMBOL * len(runners))
     if settings.USE_ML_GATE:
         try:
             from ml.gate import MLGate
@@ -304,5 +307,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nStopped.")
-
-        

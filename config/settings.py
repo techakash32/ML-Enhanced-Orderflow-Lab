@@ -220,7 +220,9 @@ GROQ_TIMEOUT_SECONDS = 30
 # Paper execution
 # =====================================================================
 
-PAPER_START_EQUITY = 10000.0
+PAPER_START_EQUITY = 10000.0                 # single-account default (backtest, PaperTrader default)
+# Paper-live: every traded symbol gets its OWN account of this size (4 symbols x 10,000 = 40,000 total).
+PAPER_EQUITY_PER_SYMBOL = float(os.environ.get("PAPER_EQUITY_PER_SYMBOL", "10000"))
 PAPER_RISK_PER_TRADE_PCT = 0.5
 PAPER_STALE_BARS = 60
 PAPER_STATE_PATH = "logs/paper/state.json"
@@ -327,5 +329,3 @@ WS_MARKET_BASE = os.environ.get("WS_MARKET_BASE", "wss://fstream.binance.com/mar
 if os.environ.get("FEE_OVERRIDE", "false").lower() == "true":
     PAPER_FEE_TAKER_PCT = float(os.environ.get("FEE_TAKER", str(PAPER_FEE_TAKER_PCT)))
     PAPER_FEE_MAKER_PCT = float(os.environ.get("FEE_MAKER", str(PAPER_FEE_MAKER_PCT)))
-
-    
